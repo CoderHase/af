@@ -1,0 +1,342 @@
+#!/usr/bin/gawk -f
+#
+
+#
+#   check-archive - do some tests on af's archive directory
+#   Copyright (C) 2019-2023  Wolfgang Zekoll, <wzk@quietsche-entchen.de>
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+
+@load "filefuncs"
+
+
+function skipws(line) {
+	sub(/^[ \t\r\n]+/, "", line);
+	return (line);
+	}
+
+function noctrl(line) {
+	sub(/[ \t\r\n]+$/, "", line);
+	return (line);
+	}
+
+function sq(string) {
+	gsub(/'/, "'\\''", string);
+	string = "'" string "'";
+	return (string);
+	}
+
+
+function error(s) {
+	printf ("%s: %s\n", program, s) >>STDERR;
+	exit (1);
+	}
+
+function bn(fn) {
+	sub(/^.*\//, "", fn);
+	return (fn);
+	}
+
+function dn(fn) {
+	if (index(fn, "/") == 0)
+		return ("");
+
+	sub(/\/[^\/]*$/, "", fn);
+	return (fn);
+	}
+
+
+
+function readDir(dir, sbuf,   i, cmd, line, fn, p, x) {
+	# cmd = sprintf ("/bin/ls -l %s", sq(dir));
+	cmd = sprintf ("find %s -printf %s | sort ",
+			sq(dir), sq("%P\\t%Y\\t%M\\t%u\\t%g\\t%s\\t%TY-%Tm-%Td,%TH:%TM:%TS\\n"));
+	while (cmd | getline line > 0) {
+		split(line, x, "\t");
+		fn = x[1];
+
+		p = x[7];
+		sub(/\..*$/, "", p);
+
+		# File type, permissions, owner, group, size,
+		# and last-modification date.
+		sbuf[fn] = x[3] "\t" x[4] "\t" x[5] "\t" x[6] "\t" p;
+		}
+
+	close (cmd);
+	return (0);
+	}
+
+
+# _statusfile_ is the .archive.tab, _status_[_fn_] receives unix
+# permisssions, owner, group, size and lastmod time of _fn_,
+# _apath_[_fn_] is the _fn_'s relative path in the archive,
+# and _sinfo_[] is _apath_[_fn_]'s size.
+
+function readIndex(statusfile, status, apath, sinfo,   line, fn, x, err) {
+	
+	while (getline line <statusfile > 0) {
+		if ((n = split(line, x, "\t")) == 2) {
+			if (x[1] == "version~"  &&  versionNumber != "")
+				indexVersion = x[2]+0;
+
+			continue;
+			}
+		else if (n < 8)
+			continue;
+
+		fn = x[1];
+		status[fn] = x[3] "\t" x[4] "\t" x[5] "\t" x[6] "\t" x[7] "\t" x[8];
+
+		# The file's path in the archive.
+		apath[fn] = x[8];
+
+		# The file's size is the only thing we compare
+		# for the archived file.
+		sinfo[ apath[fn] ] = x[6];
+		}
+
+	close (fn);
+	return (err);
+	}
+
+
+
+#
+# compare() compares the source directory contents in _sbuf_[] against
+# the information from the archive's statusfile in _status_[].
+#
+
+function compare(sbuf, status,   f, i, n, p, fn, err, x) {
+
+	printf ("++ Comparing directory and index.\n");
+	n = asorti(sbuf, x);
+	for (i = 1; i <= n; i++) {
+		fn = x[i];
+		if (fn == "")
+			continue;
+
+		if (! (fn in status)) {
+
+			# Export statusfiles may or may not be part
+			# of the index.
+			if (fn ~ /^\.af-.*\.tab$/)
+				;
+			else {
+				printf ("%s: not found in index.\n", fn);
+				err++;
+				}
+			}
+		else if (fn == indexName)
+			; # ignore diff on this file.
+		else {
+			p = status[fn];
+			sub(/\t[^\t]*$/, "", p);
+			if (sbuf[fn] != p) {
+				printf ("%s: file status differs:\n", fn);
+				printf ("  %s\n", sbuf[fn] "\t" fn);
+				printf ("  %s\n",  status[fn]);
+				err++;
+				}
+			}
+
+		delete sbuf[fn];
+		delete status[fn];
+		}
+
+	n = asorti(status, x);
+	if (n > 0) {
+		printf ("\n");
+		printf ("files not in directory:\n");
+		for (i = 1; i <= n; i++) {
+			fn = x[i];
+			printf ("%s: %s\n", fn, status[fn]);
+			err++;
+			}
+		}
+
+	return (err);
+	}
+
+
+#
+# verifyFiles() checks if all files in the statusfile exist
+# on disk and have the correct size.
+#
+
+function verifyFiles(status,   i, n, buf, x, y, fn, err) {
+
+	n = asorti(status, x);
+	if (n == 0) {
+		printf ("-- No files found.\n");
+		exit (1);
+		}
+
+	printf ("++ Verifying files exist in archive, %s files.\n", n);
+	for (i = 1; i <= n; i++) {
+		fn = x[i];
+		split(status[fn], y, "\t");
+
+		if (substr(y[1], 1, 1) != "-")
+			;
+		else if (stat(baseDir "/" y[6], buf) != 0) {
+			printf ("%s: file not found in archive\n", fn);
+			err++;
+			}
+		else if (1) {
+			# Compare the file's size against the data
+			# from .archive.tab.
+			if (buf["size"] != y[4]) {
+				printf ("%s: different size, archive= %s, fs= %s\n",
+					fn, y[4], buf["size"]);
+				err++;
+				}
+			}
+
+		delete status[fn];
+		}
+
+#		else if (bn(fn) == indexName)
+#			delete sinfo[fn]; # Most probably these will differ.
+#		}
+
+	n = asorti(status, x);
+	for (i = 1; i <= n; i++) {
+		printf ("%s: file not found\n", x[i]);
+		err++;
+		}
+
+	return (err);
+	}
+
+
+function usage() {
+	printf ("usage: %s <index-file> [<src-directory>]\n", program);
+	printf ("\n");
+
+	printf ("%s verifies if the files from <index-file> exist on disk and\n" \
+		"have the correct size.  If <src-directory> is given then its contents\n" \
+		"is compared against the data from <index-file>.  Differences are\n" \
+		"reported.\n" \
+		"\n" \
+		"If check-archive is run immediately after `af create` no unexpected\n" \
+		"differences should be reported.\n" \
+		"\n", program);
+
+	exit (0);
+	}
+
+function nextarg(par,   arg) {
+	if (argi >= ARGC) {
+		printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+		exit (1);
+		}
+		
+	arg = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (arg);
+	}
+
+BEGIN {
+	program = "check-index";
+	STDERR = "/dev/stderr";
+
+	isArchive = "";
+	compareDir = 0;
+	verbose = 0;
+
+	argi = 1;
+	while (argi < ARGC  &&  substr(ARGV[argi], 1, 1) == "-") {
+		options = nextarg("option");
+		if (options == "--")
+			break;
+
+		for (i = 2; i <= length(options); i++) {
+			c = substr(options, i, 1);
+			if (c == "d")
+				debug = 1;
+			else if (c == "l") {
+				dir = nextarg("directory");
+				compareDir = 1;
+				}
+			else if (c == "v")
+				verbose = 1;
+			else {
+				printf ("%s: unkown option: -%s\n", program, c) >>STDERR;
+				exit (1);
+				}
+			}
+		}
+
+	if (argi >= ARGC)
+		usage();
+
+	versionNumber = "";
+	idx = nextarg("statusfile");
+	if (isArchive == "") {
+		if (match(idx, /\/?([0-9]+)-[0-9]+.*\/[^\/]+$/, x) > 0) {
+			isArchive = 1;
+			versionNumber = x[1]+0;
+			}
+		}
+
+	if (argi < ARGC) {
+		dir = nextarg("directory");
+		compareDir = 1;
+		}
+
+	baseDir = dn(idx);
+	if (isArchive)
+		baseDir = index(baseDir, "/") > 0? dn(baseDir): ".";
+
+	readIndex(idx, status, apath, sinfo);
+	indexName = bn(idx);
+
+
+	printf ("\n");
+
+
+	if (compareDir == 0)
+		printf ("** Verifying %s\n", sq(idx));
+	else
+		printf ("** Comparing %s and %s\n", sq(dir), sq(idx));
+
+
+	if (versionNumber != "") {
+		if (indexVersion == "")
+			printf ("++ version number from directory: %04d\n", versionNumber);
+		else if (versionNumber == indexVersion)
+			printf ("++ version numbers match: %04d\n", versionNumber);
+		else {
+			printf ("version numbers don't match: index: %d, directory= %d\n",
+					indexVersion, versionNumber);
+			err++;
+			}
+		}
+
+	if (compareDir != 0) {
+		readDir(dir, sbuf);
+		err += compare(sbuf, status);
+		}
+
+	err += verifyFiles(status);
+	printf ("== %s errors\n", err);
+	printf ("\n");
+
+	exit (err > 0);
+	}
+

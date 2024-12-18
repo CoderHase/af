@@ -1,0 +1,565 @@
+#!/usr/bin/gawk -E
+#
+
+
+BEGIN {
+	maxArg  = 20;
+	maxLen  = 8192;
+	}
+
+function error(msg) {
+	printf ("%s: %s\n", program, msg) >>STDERR;
+	exit (1);
+	}
+
+
+function skipws(line) {
+	sub(/^[ \t\r\n]+/, "", line);
+	return (line);
+	}
+
+function noctrl(line) {
+	sub(/[ \t\r\n]+$/, "", line);
+	return (line);
+	}
+
+function getEol(   p) {
+	p = "\n";
+	return (p);
+	}
+
+function sq(string) {
+	gsub(/'/, "'\\''", string);
+	string = "'" string "'";
+	return (string);
+	}
+
+function dq(s) {
+	gsub(/\\"`/, "\\&", s);
+	s = "\"" s "\"";
+	return (s);
+	}
+
+function sq2(s,   i, d) {
+	if (useShellVar != 0  &&  s !~ /[\\\$]/) {
+		for (i = 1; i <= _sqc; i++) {
+			if (substr(s, _sqLen[i]+1, 1) == "/"  &&
+			    substr(s, 1, _sqLen[i]) == _sqPath[i])
+				d = dq( "${" _sqName[i] "}/" substr(s, _sqLen[i] + 2));
+			else if (s == sqPath[i])
+				d = dq( "${" _sqName[i] "}/");
+			}
+		}
+
+	if (d == "")
+		d = sq(s);
+
+	return (d);
+	}
+
+function sq2dir(var, val) {
+	if (val == ""  ||  val == "/")
+		return;
+
+	_sqc++;
+	_sqName[_sqc] = var;
+	_sqLen[_sqc]  = length(val);
+	_sqPath[_sqc] = val;
+
+	SQ2 = SQ2 sprintf ("%s=%s  ||  exit 1\n", var, sq(val));
+	}
+
+function initOperations(   I) {
+	if (useShellVar == 0)
+		return ("");
+
+	I = SQ2;
+	if (I != "")
+		I = I "\n";
+
+	return (I);
+	}
+
+
+
+function bn(fn) {
+	sub(/^.*\//, "", fn);
+	return (fn);
+	}
+
+function dn(fn) {
+	if (index(fn, "/") == 0)
+		return ("");
+
+	sub(/\/[^\/]*$/, "", fn);
+	return (fn);
+	}
+
+
+
+#
+# Look, which volume directoris are available.
+#
+
+function getDirList(   k, p, cmd, line, max, x) {
+
+	cmd = sprintf ("find %s -type d -name %s -maxdepth 1 -printf '%P\n' 2>/dev/null",
+			sq(BASEDIR), sq("[0-9]*"));
+
+	while (cmd | getline line > 0) {
+		if (match(line, /^([0-9]+)-/, x) == 0)
+			continue;
+
+		k = line+0;
+		if (k > 0)
+			_volume[k] = line;
+
+		if (k > max)
+			max = k;
+		}
+
+	close (cmd);
+	_volume[""] = max;
+
+	return (max);
+	}
+
+
+
+function getArchiveFile(fn) {
+	sub(/=[^=]*$/, "", fn);
+	return (fn);
+	}
+
+function getArchiveMode(fn,   mode, x) {
+	if (match(fn, /=([^=]+)$/, x) > 0)
+		mode = x[1];
+	else {
+		if (fn ~ /\.cpio$/)
+			mode = "cpio";
+		else if (fn ~ /\.(cgz|cpio.gz)$/)
+			mode = "cgz";
+		else if (fn ~ /\.(tgz|tar.gz)$/)
+			mode = "tgz";
+		else if (fn ~ /\.(shar|sh)$/)
+			mode = "shar";
+		else if (fn ~ /\.zip$/)
+			mode = "zip";
+		}
+
+	if (mode !~ /^(cpio|cgz|tgz|zip|shar)$/)
+		error("bad archive mode: " mode);
+
+	return (mode);
+	}
+
+#
+# getArchiveOperation() computes a shell command to put the files
+# argv[1 .. argc] into the file archive of format mode = [tar|cpio|zip].
+#
+
+function getArchiveOperation(mode, archive, base, argc, argv,
+					i, fn, dir, p,
+					__haveDir, cmd, T) {
+	for (i = 1; i <= argc; i++) {
+		fn  = argv[i];
+		dir = dn(fn);
+		if (! (dir in __haveDir)) {
+			p = dir "\n";
+			__haveDir[dir] = 1;
+
+			# Add parent directories as needed.
+			while ((dir = dn(dir)) != ""  &&  ! (dir in __haveDir)) {
+				p = p dir "\n";
+				__haveDir[dir] = 1;
+				}
+
+			if (mode !~ /^(tar|zip|shar)$/)
+				T = T p; 
+			}
+
+		T = T fn "\n";
+		}
+
+	if (mode == "tgz")
+		cmd = "tar -czv --verbatim-files-from -T -";
+	else if (mode == "cpio"  ||  mode == "cgz")
+		cmd = "cpio --create -v";
+	else if (mode == "cgz")
+		cmd = "cpio --create -v <<~EOF | gzip";
+	else if (mode == "shar")
+		cmd = "shar -z";
+	else if (mode == "zip")
+		cmd = "zip -@ -";
+	else
+		error("bad archive mode: " mode);
+
+	T = sprintf ("( cd %s  &&\n" \
+			"  exec %s <<~EOF) >%s;  rc=$?\n",
+			sq(base), cmd, sq(archive)) \
+		T \
+		"~EOF\n";
+
+	if (mode == "cgz") {
+		T = T \
+			"if [ $rc = "0" ]; then\n" \
+			sprintf ("  gzip -S '~' %s  &&  mv %s %s; rc=$?\n",
+				sq(archive), sq(archive "~"), sq(archive)) \
+			"fi\n";
+		}
+
+	T = T \
+		"if [ $rc != "0" ]; then\n" \
+		sprintf ("  echo error creating archive: %s >&2\n",
+			sq(archive)) \
+		"  exit 1\n" \
+		"fi\n";
+
+	T = T "\n";
+	return (T);
+	}
+
+
+
+
+function addFile(vol, fn, size,   k, pa) {
+	k = _flist[""];
+	pa = sprintf ("%s/%s", _volume[vol], fn);
+	_flist[++k] = pa;
+	_flist[""]  = k;
+	_files_deleted++;
+	_bytes_deleted += size;
+	}
+
+
+function removeVolumes(lower, upper,   k, fn, dir, line, cmd, x,
+				haveFile, startsWithLast) {
+
+	# Find the next existing directory above upper.
+	for (k = upper + 1; k <= _maxvol; k++) {
+		if (k in _volume)
+			break;
+		}
+
+	# If no next directory exists we use the upper.
+	if (k > _maxvol)
+		startsWithLast = 1;
+	else {
+		# Enumerate the files in this directory.  Any file found
+		# here can be removed in an earlier volume.
+
+		cmd = sprintf ("find %s -type f -printf '%%P\t%%s\n' 2>/dev/null",
+				sq(BASEDIR "/" _volume[k]));
+
+		while (cmd | getline line > 0) {
+			split( noctrl(line), x, "\t");
+			fn = x[1];
+			if (fn == ".archive.tab"  ||  fn == ".archive.log")
+				continue;
+
+			haveFile[fn] = k;
+			}
+
+		close (cmd);
+		}
+
+
+	for (k = upper; k >= lower; k--) {
+		if (! (k in _volume))
+			continue;
+
+		# Repeat the file search from above.  Delete files
+		# if they are in haveFile[] and add found files to
+		# haveFile[] to remove them in a lower volume.
+
+		cmd = sprintf ("find %s -type f -printf '%%P\t%%s\n' 2>/dev/null | sort",
+				sq(BASEDIR "/" _volume[k]));
+
+		while (cmd | getline line > 0) {
+			_files_in_volumes++;
+			split( noctrl(line), x, "\t");
+			dir = dn(_volume[k] "/" x[1]);
+			if (! (dir in _file_count)) {
+print x[1], dir >>STDERR;
+				_file_count[dir] = 0;
+				}
+
+			fn = x[1];
+			if (fn == ".archive.tab"  ||  fn == ".archive.log")
+				addFile(k, fn, x[2]);
+			else if (fn in haveFile  ||  startsWithLast != 0)
+				addFile(k, fn, x[2]);
+			else {
+				haveFile[fn] = k;
+				_file_count[dir]++;
+				_bytes_remaining += x[2];
+				}
+			}
+
+		close (cmd);
+		delete _volume[k];
+		}
+	}
+
+
+
+#
+# Create single file operations.
+#
+
+function __getOperations(cmd, flags, n, list,   i, fn, p, x, y, S) {
+	if (flags != "")
+		flags = " " flags;
+
+	for (i = 1; i <= n; i++) {
+		fn = list[i];
+		if (fn == "")
+			continue;
+
+		p = sprintf ("%s%s %s", cmd, flags, sq2(BASEDIR "/" fn));
+		S = S p getEol();
+		}
+
+	return (S);
+	}
+
+
+#
+# Take command line arguments from argv[1 .. argc] until either maxArg
+# or maxLen is reached.
+#
+
+function getParameter(argc, argv, base,   k, n, len, p, par) {
+	if ((k = argv[0]) == 0)
+		k = 1;
+
+	while (k <= argc  &&  n < maxArg  &&  len < maxLen) {
+		if ((p = argv[k++]) == "")
+			continue;
+
+		if (base != "")
+			p = base "/" p;
+
+		par = par " " sq2(p);
+		len += length(p) + 3;
+		n++;
+		}
+
+	argv[0] = k;
+	return (par);
+	}
+
+function getOperations(cmd, n, list, dirControl,   i, k, p, fn, dir,
+					argc, argv, S) {
+	if (multifile == 0) {
+		for (i = 1; i <= n; i++) {
+			fn = list[i];
+			if (fn == "")
+				continue;
+
+			p = sprintf ("%s %s", cmd, sq2(BASEDIR "/" fn));
+			S = S p getEol();
+			}
+		}
+	else if (dirControl != 0) {
+		k = 1;
+		while (k <= n) {
+
+			# Take all files in the same directory ...
+			argc = argv[0] = 0;
+			dir = dn(list[k]);
+			while (k <= n  &&  dn(list[k]) == dir)
+				argv[++argc] = list[k++];
+
+			# ... and create commands for them.
+			while ((p = getParameter(argc, argv, BASEDIR)) != "")
+				S = S cmd " " skipws(p) getEol();
+			}
+		}
+	else {
+		while ((p = getParameter(n, list, BASEDIR)) != "")
+			S = S cmd " " skipws(p) getEol();
+		}
+
+	return (S);
+	}
+
+function getFileOperations(n, list,   S) {
+	S = getOperations("rm -f", n, list, 1);
+
+	return (S);
+	}
+
+function getDirOperations(dirc, dirv,   i, argv, S) {
+	if (dirc == 0)
+		return ("");
+
+	asort(dirv);
+	for (i = 1; i <= dirc; i++)
+		argv[dirc + 1 - i] = dirv[i];
+
+	S = "\n" getOperations("rmdir -f", dirc, argv, 0);
+	return (S);
+	}
+
+
+function usage() {
+	printf ("\nusage: %s [<options>] <base-directory> <from>[-<to>] ...\n\n", program);
+
+	printf ("%s creates shell commands to remove volumes from the\n" \
+		"af(1) archive below <base-directory> by deleting files that are\n" \
+		"part of the volumes listed on the command line.  Files, which\n" \
+		"are required for other volumes are untouched.  The commands\n" \
+		"must be piped to sh(1) to execute them.\n" \
+		"\n", program);
+
+	printf ("Options:\n" \
+		"  -m <fn>	copy files to archive file <fn> before deleting.\n" \
+		"  -s		create one operation per file.\n" \
+		"  -z		use a shell variable for the base directory.\n" \
+		"\n");
+
+	printf ("Archive filenames have the form <filename>[=<format>] where <format>\n" \
+		"is one of cpio, cgz, shar, tgz or zip to set the file format explicitly.\n" \
+		"The <format> identifier is not required if they are the extension\n" \
+		"of <filename>.  (.[tar|cpio].gz are also supported.)\n" \
+		"\n");
+
+	printf ("Only volume numbers are valid volume selectors.\n" \
+		"\n");
+	exit (0);
+	}
+
+function nextarg(par,   arg) {
+	if (argi >= ARGC) {
+		printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+		exit (1);
+		}
+		
+	arg = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (arg);
+	}
+
+BEGIN {
+	program = "delete-files";
+	OUT = STDERR = "/dev/stderr";
+
+	_verbose = 1;
+	debug = 0;
+	multidir  = 1;
+	multifile = 1;
+	useShellVar = 0;
+
+	argi = 1;
+	while (argi < ARGC  &&  substr(ARGV[argi], 1, 1) == "-") {
+		options = nextarg("option");
+		if (options == "--")
+			break;
+
+		for (i = 2; i <= length(options); i++) {
+			c = substr(options, i, 1);
+			if (0)
+				;
+			else if (c == "m") {
+				p = nextarg("archive");
+				outputMode = getArchiveMode(p);
+				archiveFile = getArchiveFile(p);
+				}
+			else if (c == "s") {
+				multidir  = 0;
+				multifile = 0;
+				}
+			else if (c == "z")
+				useShellVar = 1;
+			else {
+				printf ("%s: unkown option: -%s\n", program, c) >>STDERR;
+				exit (1);
+				}
+			}
+		}
+
+	if (argi >= ARGC)
+		usage();
+
+	BASEDIR = nextarg("base directory");
+	sub(/\/+$/, "", BASEDIR);
+	_maxvol = getDirList();
+	sq2dir("S", BASEDIR);
+
+	while (argi < ARGC) {
+		arg = nextarg("volume number");
+		if (arg ~ /^[0-9]+$/) {
+			lower = arg+0;
+			upper = lower;
+			}
+		else if (match(arg, /^([0-9]+)(-([0-9]+))?$/, x) > 0) {
+			lower = x[1]+0;
+			upper = x[3]+0;
+			}
+		else
+			error("bad volume selector: " arg);
+
+		if (lower > upper)
+			error("bad range: " lower "-" upper);
+		else if (lower > _maxvol)
+			error("lower bound out of range: " lower);
+
+		if (upper > _maxvol)
+			upper = _maxvol;
+
+		removeVolumes(lower, upper);
+		}
+
+	#
+	# Get the sorted list of files.
+	#
+
+	n = _flist[""];
+	delete _flist[""];
+	asort(_flist, filev);
+
+
+	#
+	# Compute which directories should be empty.
+	#
+
+	dirc = 0;
+	for (p in _file_count) {
+		if (_file_count[p] == 0) {
+			sub(/^\/+/, "", p);
+			dirv[++dirc] = p;
+			}
+		}
+
+	#
+	# A simple statistic.
+	#
+
+	p = sprintf ("# files in volumes: %d\n" \
+		     "# deleted: %d\n" \
+		     "# remaining: %d\n",
+			_files_in_volumes, _files_deleted,
+			_files_in_volumes - _files_deleted);
+
+
+	#
+	# Create the operations.
+	#
+
+	T = "";
+	if (archiveFile != "")
+		T = getArchiveOperation(outputMode, archiveFile, BASEDIR, n, filev);
+
+	T = initOperations() \
+		T \
+		getFileOperations(n, filev) \
+		getDirOperations(dirc, dirv) \
+		"\n" \
+		p;
+	print T;
+
+	exit (0);
+}
+

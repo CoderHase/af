@@ -1,0 +1,2386 @@
+#!/usr/bin/gawk -E
+#
+
+#
+#   af - archive files
+#   Copyright (C) 2012-2024  Wolfgang Zekoll, <wzk@quietsche-entchen.de>
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+BEGIN {
+	pv = "1.7.2";
+
+	historyEditor = "nano";
+	alwaysOmitPattern = "(~|\\$|.tmp$|.swp$)";
+	defaultOmitPattern = "^(out(.[0-9])?|cut)$";
+	cpFlags = "--preserve=timestamps";
+	autopager = 1;
+
+	if (PROCINFO["uid"] != "")
+		userId = PROCINFO["uid"]+0;
+	else {
+		cmd = "id -u";  cmd | getline userId;  close(cmd);
+		}
+
+	if (userId == "0") {
+		isRoot = 1;
+		cpFlags = "--preserve=all";
+		}
+
+	TTY = "/dev/tty";
+	}
+
+
+# error() prints the error message _msg_ and terminates the script.
+
+function error(msg) {
+	printf ("%s: %s\n", program, msg) >>STDERR;
+	exit (1);
+	}
+
+
+function mkdir(dir, noParents, getCmd,   rc, cmd) {
+	if (noParents != 0) {
+		cmd = sprintf ("test -d %s  ||\n" \
+			"  { echo no such directory: %s >&2; exit 1; }\n",
+			sq(dn(dir)), sq(dn(dir)) );
+		}
+
+	cmd = cmd sprintf ("mkdir -p %s  ||  exit 1\n", sq(dir));
+
+	if (getCmd != 0)
+		return (cmd);
+
+	if ((rc = _system(cmd)) != 0)
+		exit (rc);
+
+	return (rc);
+	}
+
+function __copyfile(src, dst,   rc, cmd) {
+	cmd = sprintf ("cp %s %s %s", cpFlags, sq(src), sq(dst));
+	rc = _system(cmd);
+	return (rc);
+	}
+
+function movefile(src, dst,   rc, cmd) {
+	cmd = sprintf ("mv %s %s", sq(src), sq(dst));
+	#if ("mtp" in afFlags)
+	#	cmd = cmd " 2>/dev/null";
+
+	rc = _system(cmd);
+	return (rc);
+	}
+
+function verbose(s) {
+	if (_verbose > 0) {
+		if (substr(s, 1, 2) != "U "  ||  allfiles != 0)
+			printf ("%s", s) >>OUT;
+		}
+
+	return (0);
+	}
+
+function getWord(line, parts,   x) {
+	delete parts;
+	if (match(line, /^[ \t]*([^ \t]+)([ \t]+(.*))?$/, x) == 0) {
+		if (line != "")
+			error("error parsing line: " line);
+		}
+
+	parts[1] = x[1];
+	parts[2] = x[3];
+
+	return (parts[1]);
+	}
+
+function skipws(line) {
+	sub(/^[ \t\r\n]+/, "", line);
+	return (line);
+	}
+
+function noctrl(line) {
+	sub(/[ \t\r\n]+$/, "", line);
+	return (line);
+	}
+
+function sq(string) {
+	gsub(/'/, "'\\''", string);
+	string = "'" string "'";
+	return (string);
+	}
+
+function bn(fn) {
+	sub(/^.*\//, "", fn);
+	return (fn);
+	}
+
+function dn(fn, d) {
+	if (index(fn, "/") == 0)
+		return (d);
+
+	sub(/\/[^\/]*$/, "", fn);
+	return (fn);
+	}
+
+
+function _system(cmd, forceExec,   rc) {
+	if (debug != 0)
+		printf (">> %s\n", cmd) >>STDERR;
+	else if (listonly != 0  &&  forceExec == 0)
+		return (0);
+
+	rc = system(cmd);
+	return (rc);
+	}
+
+
+function initArchive(   i, j, k, p, cmd, fn, line) {
+	# mkdir(BASEDIR);	Wird das benötigt?
+	NOW = systime();
+
+	isMirror = afConf["mirror"];
+	if (isMirror != 0) {
+		WORKDIR = BASEDIR;
+		THISDIR = ".";
+		prevIndex = BASEDIR "/.archive.tab";
+		}
+	else {
+		# Get previous backup number and last index table.
+		cmd = sprintf ("ls -1r %s 2>/dev/null", sq(BASEDIR));
+		PREV    = 0;
+		PrEVDIR = "";
+		while (cmd | getline line > 0) {
+			if (line ~ /^[0-9]+(-.*)?$/) {
+
+				#
+				# PREV does not always match PREVDIR.
+				# Example: there is directory 0007, so PREV = 7.
+				# But we can't use it as PREVDIR because there's
+				# no .archive.tab in the directory (for whatever
+				# reason).
+				# The next .archive.tab is in 0005 which is then
+				# out PREVDIR.
+				#
+
+				p = line+0;
+				if (p > PREV)
+					PREV = p;
+
+				fn = BASEDIR "/" line "/.archive.tab";
+				rc = getline p <fn;
+				close (fn);
+
+				if (rc > 0) {
+					PREVDIR = BASEDIR "/" line;
+					break;
+					}
+				}
+			}
+
+		close (cmd);
+
+		PREV = sprintf ("%04d", PREV);
+		prevIndex = PREVDIR "/.archive.tab";
+
+		# Get serial number for this backup.
+		THIS = sprintf ("%04d", PREV+1);
+
+		DATE = strftime("%Y%m%d", systime());
+		THISDIR = sprintf ("%s-%s", THIS, DATE);
+		if (op != "create"  &&  op != "archive")
+			;
+		else if (PREV == "0000")
+			verbose("initial version\n");
+		else
+			verbose( sprintf("previous is %s, this is %s\n", bn(PREVDIR), THISDIR) );
+
+		WORKDIR = sprintf ("%s/zz-%s-%04X-%s", BASEDIR, THIS, PROCINFO["pid"], DATE);
+		}
+
+	logFile = WORKDIR "/.archive.log";
+	thisIndex = WORKDIR "/.archive.tab";
+
+	if (finalizeOnError)
+		errorLog = WORKDIR sprintf("/.archive-error-%04d.log", THIS);
+
+	return (0);
+	}
+
+function readIndex(fn,   line, x, version) {
+	while (getline line <fn > 0) {
+		split(line, x, "\t");
+		if (x[1] == "version~") {
+			version = x[2]+0;
+			continue;
+			}
+
+		pRec[x[1]] = line;
+		}
+
+	close (fn);
+	return (version);
+	}
+
+function writeIndex(fn, version,   i, n, p, x) {
+	n = asorti(cRec, x);
+	for (i = 1; i <= n; i++) {
+		p = x[i];
+		printf ("%s\n", cRec[p]) >fn;
+		}
+
+	if (version+0 > 0)
+		printf ("version~\t%d\n", version) >fn;
+
+	if (close (fn) != 0)
+		error("error writing index: " fn ", " ERRNO);
+
+	return (n);
+	}
+
+function updateHistory(ht,   cmd, tx, tx2, fn, sig, line,
+			p, editor, checkExit, _RS) {
+	if (listonly != 0  ||  historyFile == ""  ||  historyFile == ".")
+		return (0);
+	else if (system("tty --silent") != 0)
+		return (0);
+
+	if (CONF != ".")
+		historyFile = CONF "/" historyFile;
+
+	_RS = RS;  RS = "\002";
+	while (getline line <historyFile > 0)
+		tx = tx line RT;
+
+	close (historyFile);
+	RS = _RS;
+
+	if (ht != "") {
+		ht = "\n" skipws(noctrl(ht));
+		ht = gensub(/\n([^\n])/, "\n    \\1", g, ht);
+		ht = ht "\n";
+		}
+
+	sig = ENVIRON["USER"];
+	fn = "/etc/hostname";  getline line <fn;  close(fn);
+	if (line != "")
+		sig = sig " / " line;
+
+	line = sprintf ("\n  %s%04d -- %s -- %s\n%s\n",
+			(section == ""? "": section ": "),
+			THIS, strftime("%Y-%m-%d %H:%M", systime()),
+			sig, ht);
+	tx2 = tx;
+	gsub(/^[\r\n]+/, "", tx2);
+	tx2 = noctrl(line) "\n\n" tx2;
+	printf ("%s", tx2) >historyFile;
+	close (historyFile);
+
+	if ((editor = historyEditor) == "")
+		editor = "+vi";
+
+	if (substr(editor, 1, 1) == "+") {
+		checkExit = 1;
+		editor = substr(editor, 2);
+		}
+
+	cmd = sprintf ("%s %s", sq(editor), sq(historyFile));
+	rc = system(cmd);
+	if (checkExit == 0) {
+		printf ("Continue? ") >>"/dev/tty";
+		getline p <"/dev/tty";
+		rc = p ~ /^[yY]/? 0: 1;
+		}
+
+	if (rc != 0) {
+		printf ("%s", tx) >historyFile;
+		close (historyFile);
+
+		printf ("%s: operation cancelled\n", program);
+		exit (0);
+		}
+
+	return (0);
+	}
+
+
+
+function isExcludeDir(d,   i, n, x, p) {
+	if (d in excludeDir)
+		return (1);
+
+	n = split(d, x, "/");
+	p = x[1];
+	if ((p = x[1]) in excludeDir) {
+		excludeDir[p] = 1;
+		return (1);
+		}
+
+	for (i=2; i<=n; i++) {
+		p = p "/" x[i];
+		if (p in excludeDir) {
+			excludeDir[p] = 1;
+			return (1);
+			}
+		}
+
+	return (0);
+	}
+
+
+
+# In addition to the mkdir/cp commands from createCopy(), we maintain
+# a list of all file operations grouped by type for exports.
+#
+# The two `cp` arguments are separated with a tab, see createCopy().
+#
+# Parameter _p_ is set by createCopy().
+
+function addOp(op, fn, st, p) {
+	if (op == "mkdir"  &&  haveDir[fn] != "")
+		return;
+
+	if (p == "") {
+		p = fn;
+		gsub(/(^\.\/|\t.*$)/, "", p);
+		}
+
+	fops[op] = fops[op] fn "\n";
+	if (st != "")
+		logChange(st " " p "\n", 1);
+
+	# Append the file to the list of items to backup.
+	if (op == "rm")
+		fops["_"] = fops["_"] p "\n";
+	else if (op == "mkdir"  ||  op == "rmdir")
+		fops["_"] = fops["_"] p "/" "\n";
+	else if (op == "cp") {
+		if (st == "M"  ||  st == "O")
+			fops["_"] = fops["_"] p "\n";
+		}
+
+	# Count the operations.
+	fops[""]++;
+	if (op == "mkdir")
+		haveDir[fn] = 1;
+	}
+
+
+#
+# alignDst() replaces par with the destination's volume directory
+# if par is a single dot `.' and inserts dir as prefix otherwise.
+#
+
+function alignDst(dir, par,   p) {
+	if (dir == "")
+		p = par;
+	else if (par == ".")
+		p = dir;
+	else
+		p = dir "/" par;
+
+	if (substr(p, 1, 4) == "././")
+		p = substr(p, 3);
+
+	return (p);
+	}
+
+
+
+#
+# getOperations() takes the fops[] for key (= name of shell command)
+# and creates a list of shell commands.  If rev != 0 then the list
+# is in descending filename order and ascending otherwise.
+#
+
+function __getOperations(cmd, rev, dir, key, f,   i, n, p, x, y, list,
+				is_copy, el) {
+	n = split(fops[key == ""? cmd: key], x, "\n");
+	if (x[n] == "")
+		delete x[n];
+
+	if (showProgress)
+		is_copy = substr(cmd, 1, 3) == "cp ";
+
+	if (substr(cmd, 1, 3) == "cp "  &&  errorLog != "")
+		cmd = "  " cmd;
+
+	n = asort(x, list);	# TODO: list is not used below?
+	for (i = 1; i <= n; i++) {
+
+		if (split(x[rev? n + 1 - i: i], y, "\t") == 1)
+			p = p cmd " " sq( alignDst(dir, y[1]));
+		else {
+			if (showProgress != 0  &&  is_copy)
+				p = p getProgress(1, y[1], i, n);
+
+			p = p cmd " " sq(y[1]) " " sq( alignDst(dir, y[2]));
+			}
+
+		p = p "\n";
+		}
+
+	if (showProgress != 0  &&  is_copy != 0)
+		p = p getProgress(1, "");
+
+	# TODO: Add `||  (ignoreErrors != 0  &&  is_copy)`?
+	if (f == 0  &&  acceptErrors[key] == 1  &&  p != "") {
+		p = "set +e\n" p "set -e\n";
+		}
+
+	return (p);
+	}
+
+
+#
+# Create a command to copy the given file and add a command
+# to create the target directory if we are not sure if it exists.
+#
+
+function createCopy(fn, sbuf, st,   i, n, x, p, rd, dir, fn2) {
+	rd  = dn(fn);
+	dir = WORKDIR "/" rd;
+	if (haveDir[dir] == "") {
+		if (dir !~ /\/$/) {	# Only WORKDIR ends with a `/'
+			n = split(rd, x, "/");
+			p = x[1];
+			addOp("mkdir", p, "N");
+			for (i = 2; i <= n; i++) {
+				p = p "/" x[i];
+				addOp("mkdir", p, "N");
+				}
+			}
+
+		haveDir[dir] = 1;
+		}
+
+	addOp("cp", sourcePath[fn] "\t" (rd == ""? ".": dn(fn)), st, fn);
+
+	fn2 = THISDIR "/"  fn;
+	return (fn2);
+	}
+
+function logChange(s, m, fn) {
+	changeLog = changeLog s;
+
+	if (m !=  0) {
+		if (_verbose > 1)
+			verbose(s);
+		else {
+			sub(/\n.*$/, "\n", s);
+			verbose(s);
+			}
+		}
+
+	return (0);
+	}
+
+
+#
+# Functions to handle file include lists.
+#
+
+function addFileInclude(p) {
+	p = skipws( noctrl(p));
+	if (p == ""  ||  p ~ /^#/)
+		return;
+
+	if (substr(p, 1, 1) != "~")
+		includeList[p] = 1;
+	else {
+		p = sprintf ("(%s)", skipws( substr(p, 2)));
+		if (includePattern == "")
+			includePattern = p
+		else
+			includePattern = includePattern "|" p;
+		}
+
+	haveIncludeList = 1;
+	}
+
+function setIncludeFiles(list,   i, n, x) {
+	n = split(list, x, "\n");
+	for (i = 1; i <= n; i++)
+		addFileInclude(x[i]);
+	}
+
+function setIncludeFilesFromFile(list,   line, i, n, x) {
+	n = split(list, x, "\n");
+	for (i = 1; i <= n; i++) {
+		if (x[i] == "")
+			continue;
+
+		while (getline line <x[i] > 0)
+			addFileInclude(line);
+
+		close(x[i]);
+		}
+	}
+
+# Check if the file fn matches the include list.
+function fileIsIncluded(fn,   i) {
+	if (haveIncludeList == 0)
+		return (1);
+
+	if (fn in includeList)
+		return (1);
+
+	if (includePattern != "") {
+		if (fn ~ includePattern)
+			return (1);
+		}
+
+	return (0);
+	}
+
+
+# getFindCmd() creates a find command to list all files below the
+# directories in _sourceList_.
+
+function getFindCmd(sourceList,   cmd, i, n, dir, path, list) {
+	n = split( noctrl(sourceList), list, "\n");
+	for (i = 1; i <= n; i++) {
+		dir = list[i];
+
+		# Check if we need (and have) an alias.
+		if (n > 1  &&  ! (dir in sourceAlias)) {
+			printf ("%s: directory without alias: %s\n", program, dir) >>STDERR;
+			exit (1);
+			}
+
+		pathlist = pathlist " " sq(dir);
+		}
+
+	# Create the find command.
+	##cmd = sprintf ("find %s -mount -readable -printf %s | sort ",
+	cmd = sprintf ("find %s %s %s -readable -printf %s",
+			followLinks != 0? "-L": "",
+			pathlist,
+			followMounts != ""? "": "-mount",
+			sq("%P\\t%Y\\t%M\\t%u\\t%g\\t%s\\t%TY-%Tm-%Td,%TH:%TM:%TS\\t%p\\t%H\\n"));
+
+	if (debug != 0)
+		printf ("cmd= %s\n", cmd) >>STDERR;
+
+	return (cmd);
+	}
+
+
+function getProgress(echo, fn, n, m,   k, p, s) {
+	if (_el == "") {	
+		"tput el" | getline _el; close("tput el");
+		if (_el == "") {
+			showProgress = 0;
+			return ("");
+			}
+		}
+
+	if (fn == "") {
+		if (echo == 1)
+			p = "  echo -n " sq("\\r" _el) " >/dev/tty\n";
+
+		return (p);
+		}
+
+
+	p = fn;
+	if ((k = length(p)) > 60) {
+		# Shorten then filename to 60 characters.
+		p = substr(p, k - 60);
+		sub(/[^\/]*\//, "", p);
+		}
+
+	if ((k = index(p, "/./")) > 0)
+		p = substr(p, k + 3);
+
+	if (n != "") {
+		s = n;
+		if (m != "")
+			s = s "/" m;
+
+		p = p " [" s "]";
+		}
+
+	if (echo == 1)
+		p = "  echo -n " sq("\\r" _el p ": ") " >/dev/tty\n";
+	else
+		p = "\r" _el p;
+
+	return (p);
+	}
+
+
+# getFiles() uses the command from getFindCmd() to list all files
+# below _sourceList_ and creates entries in _sRec_[] holding their
+# current status data.
+
+function getFiles(sourceList, sRec, cmd,   p, dir, line, i, fileCount, x) {
+
+	if (cmd == "")
+		cmd = getFindCmd(sourceList);
+
+	while (cmd | getline line > 0) {
+
+		split(line, sbuf, "\t");
+		fn = sbuf[FNAME];
+
+		if (showProgress != 0)
+			printf ("%s", getProgress(0, fn, ++fileCount)) >>TTY;
+
+		# Get the starting-point %H from find.
+		dir = sbuf[_START];
+
+		# Remove microseconds from the timestamp
+		sub(/\.[0-9]*$/, "", sbuf[FTIME]);
+
+		# Add the alias (exists, as verified in getFindCmd()).
+		if (multiSource != 0)
+			fn = sourceAlias[dir] "/" fn;
+
+		# Put the pieces together.
+		sRec[fn] = sprintf ("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+				fn, sbuf[FTYPE], sbuf[FPERM],
+				sbuf[FUSER], sbuf[FGROUP],
+				sbuf[FSIZE], sbuf[FTIME], sbuf[_SPATH]);
+
+		}
+
+	# Set a flag that shows that we have read the data.
+	sRec[""] = 1;
+
+	if (showProgress != 0)
+		printf ("\r%s", _el) >>TTY;
+
+	return (n);
+	}
+
+
+# isOnList() checks is a given file _fn_ is either in the
+# filelist or matches the file pattern.
+
+function isOnList(fn) {
+	if (haveFilelist == "")
+		return (1);	# In case function is called in wrong mode.
+
+	if (fn in fileList)
+		return (1);
+	else if (filePattern != ""  &&  fn ~ filePattern)
+		return (1);
+
+	return (0);
+	}
+
+
+# archiveFiles() compares current file status information in _sRec_
+# against previous data in _pRec_.  Archive operations are computed
+# and added using _addOp_() and new status data is stored in _cRec_,
+# which is on succesful completion written to disk by writeIndex().
+#
+# _canCompare_ is a flag that signals if (all files are on local
+# filesystems and) files can be compared for changes using _cmp_(1)
+# when modification time has changed but filesize is the same.
+#
+# If a filelist is present (e.g. `-r` option) then only files on
+# the list are considered to be updated.  All other files are
+# processed as unchanged.
+
+function archiveFiles(sRec, pRec, cRec, canCompare, \
+			i, n, cmd, line, fn, sbuf, x, \
+			p, q, st, tt, diffCmd, s, modified, fn2,
+			_filei, _filec, _filev, changes) {
+	if (sRec[""] != 1)
+		getFiles(sourceList, sRec);
+
+	_filec = asorti(sRec, _filev);
+	for (_filei = 1; _filei <= _filec; _filei++) {
+		if ((fn = _filev[_filei]) == "")
+			continue;	# The getFiles() flag.
+
+		# If we have list of files to archive check
+		# against it.
+		if (haveIncludeList != 0  &&  fileIsIncluded(fn) == 0)
+			continue;
+
+
+		split(line = sRec[fn], sbuf, "\t");
+
+		# Extract the source path and remove it from the line.
+		sourcePath[fn] = sbuf[_SPATH];
+		sourceDir[fn]  = dn(sourcePath[fn]);
+		sub(/\t[^\t]*$/, "", line);
+
+
+		# Check if this file is on one of our
+		# exclude lists.
+		p = dn(fn);
+		if (isExcludeDir(p))
+			continue;
+
+		if (fn in ignoreFile)
+			continue;
+		else if (test != 0  &&  fn in ignoreTestFile) {
+			cRec[fn] = ".";
+			continue;
+			}
+
+		p = bn(fn);
+
+		if (p == "")
+			continue;
+
+		#
+		# alwayOmitPattern matches temporary files in our
+		# directory ...
+		#
+
+		else if (p ~ alwaysOmitPattern  ||  fn ~ alwaysOmitPattern)
+			continue;
+
+		#
+		# ... omitPattern is a configurable option.
+		#
+
+		else if (omitPattern != "") {
+			if (p ~ omitPattern  ||  fn ~ omitPattern)
+				continue;
+			}
+
+
+		p = "";
+		modified = 0;
+
+		st = "";
+
+		#
+		# Check if we have a list of files to export.
+		#
+
+		if (haveFilelist != ""  &&  
+		    sbuf[FTYPE] == "f"  &&  ! isOnList(fn)) {
+			# For files, which are not on the list,
+			# no status is computed.  Instead their
+			# status is assumed (or hold) unchanged.
+			st = "";
+			}
+
+		#
+		# Compare the file status.
+		#
+
+		else if (! (fn in pRec)) {
+			st = "N"
+			}
+		else {
+			split(pRec[fn], x, "\t");
+			x[FARC] = BASEDIR "/" x[FARC];
+
+			tt = x[FTYPE] sbuf[FTYPE];
+			if (tt == "dd")
+				;	# Nothing to for directories
+			else if (tt == "df") {
+				addOp("rmdir", fn, "R");
+				st = "N";
+				}
+			else if (tt == "fd") {
+				addOp("rm", fn, "D");
+				addOp("mkdir", fn, "N");
+				}
+
+			#
+			# Both items are files.
+			#
+
+			else if (x[FSIZE] != sbuf[FSIZE])
+				st = "M";
+			else if (x[FTIME] != sbuf[FTIME]) {
+
+				#
+				# If only the mtime differs and it is not
+				# an export then compare the two files ...
+				#
+
+				#
+				# ... but not if we export.
+				#
+
+				if (canCompare == 0)
+					st = "M";
+
+				else {
+					s = fn;
+					if (sourceDir[fn] != ".")
+						s = sourcePath[fn];
+
+					diffCmd = sprintf ("cmp -s %s %s", sq(x[FARC]), sq(s));
+					if (_system(diffCmd, 1) != 0)
+						st = "M";
+					}
+				}
+
+			#
+			# Check copyall late to handle type changes,
+			# e.g. from file to directory.
+			#
+
+			if (st == ""  &&  sbuf[FTYPE] == "f"  &&  copyall > 0)
+				st = "C";
+			}
+
+
+		if (sbuf[FTYPE] != "f") {
+
+			#
+			# Non-file records (e.g. directories) don't need an
+			# update of their status record.
+			#
+
+			cRec[fn] = line "\t" ".";
+			}
+		else if (st == "") {
+			if (haveFilelist != "") {
+				# Keep previous status. (??)
+				if (fn in pRec)
+					cRec[fn] = pRec[fn];
+				}
+			else {
+				# Take the archive location from the previous
+				# status.
+				split(pRec[fn], x, "\t");
+				cRec[fn] = line "\t" x[FARC];
+				}
+
+			if (p == "")
+				p = "U " fn "\n";
+
+			logChange(p, 0);
+			}
+		else {
+			if (sbuf[FTYPE] == "f"  ||  (sbuf[FTYPE] != "d"  &&  isRoot == 1)) {
+
+				#
+				# Add command to copy file ...
+				#
+
+				fn2 = createCopy(fn, sbuf, st);
+				if (fn2 != "") {
+
+					#
+					# ... and update the status record.
+					#
+
+					cRec[fn] = line "\t" fn2;
+					# logChange(st " " fn "\n", 1);
+					}
+
+				changes++;
+				}
+			}
+		}
+
+
+	#
+	# Which files have been deleted since the last run?
+	#
+
+	n = asorti(pRec, x);
+	for (i = 1; i <= n; i++) {
+		fn = x[i];
+		if (! (fn in cRec)) {
+			split(pRec[fn], y, "\t");
+			if (y[FTYPE] == "d")
+				addOp("rmdir", fn, "R");
+			else if (y[FTYPE] != "") {
+				if (haveFilelist != ""  &&  ! isOnList(fn))
+					;
+				else
+					addOp("rm", fn, "D");
+				}
+
+			changes++;
+			}
+		}
+
+	close (cmd);
+	return (changes);
+	}
+
+
+# doShell() pipes the shell commands in _p_ to _cmd_ (default `sh -e`).
+# If the global variable _showShellCmds_ is set then `-x` is added
+# to _cmd_.
+
+function doShell(p, cmd,   rc) {
+	if (p == "")
+		return (0);
+	else if (cmd == "") {
+		cmd = "sh -e";
+		if (showShellCmds != 0)
+			cmd = cmd " -x";
+		}
+
+	printf ("%s\n", noctrl(p)) | cmd;
+	rc = close(cmd);
+	return (rc);
+	}
+
+
+# doMount() mounts or unmounts (parameter op) the gvfs location
+# indicated by side.  The location is taken from the globals MTP
+# or GIO.  If login information is present it is written to gio.
+
+function doMount(op, side, silent,   rc, cmd, ml) {
+	if (op == "umount")
+		op = "unmount";
+
+	if (side == "gio"  ||  side == "dst")
+		side = "gio";
+	else if (side == "mtp"  ||  side == "src")
+		side = "mtp";
+	else
+		error("bad mount specification: " side);
+
+	if (side == "gio") {
+		if (GIO == "")
+			error("no GIO mount configured");
+
+		GIO = extractGioPassword(GIO, side);
+		ml = GIO;
+		}
+	else {
+		if (MTP == "")
+			error("no MTP mount configured");
+
+		MTP = extractGioPassword(MTP, side);
+		ml = MTP;
+		}
+
+	cmd = sprintf ("gio mount %s%s", op == "unmount"? "-u ": "",
+				sq(ml));
+	if (silent == 0)
+		printf ("%s\n", cmd) >>STDERR;
+
+	if (op == "mount"  &&  gvfs_data[side, "auth"] != "") {
+		cmd = cmd " >/dev/null; sleep 2";
+		printf ("%s\n", gvfs_data[side, "auth"]) | cmd;
+		rc = close (cmd);
+		}
+	else
+		rc = system(cmd);
+
+	return (rc);
+	}
+
+
+
+function doInfo(fn, result,   i, n, p, name, line, cmd, tab, isRegex, prev, x) {
+	if (substr(fn, 1, 1) == "~") {
+		isRegex = 1;
+		fn = substr(fn, 2);
+		}
+
+	cmd = sprintf ("find %s -maxdepth 2 -type f -name %s -printf '%P\n' | sort",
+				sq(BASEDIR), sq(".archive.tab"));
+	while (cmd | getline tab > 0) {
+		version = sprintf("%04d", tab);
+
+		tab = BASEDIR "/" tab;
+		while (getline line <tab > 0) {
+			split(line, x, "\t");
+			p = x[FNAME];
+			if (_verbose > 1)
+				p = BASEDIR "/" x[FNAME];
+
+			sub(/,/, " ", x[FTIME]);
+			if (isRegex == 1) {
+				if (x[FNAME] ~ fn) {
+					name = x[FNAME];
+					if (x[FARC] == prev[name])
+						continue;
+
+					result[++n] = sprintf ("%-20s   %s   %s   %10s",
+						p, version, x[FTIME], x[FSIZE]);
+					prev[name] = x[FARC];
+					continue;
+					}
+				}
+			else {
+				if (x[FNAME] == fn) {
+					if (x[FARC] == prev)
+						break;
+
+					result[++n] = sprintf ("%-20s   %s   %s   %10s",
+						p, version, x[FTIME], x[FSIZE]);
+					prev = x[FARC];
+					break;
+					}
+				}
+			}
+
+		close (tab);
+		}
+
+	close (cmd);
+	for (i = 1; i <= n; i++)
+		printf ("%s\n", result[i]);
+
+	return (n);
+	}
+
+function getHistory(fn, hist,   n, p, s, cmd) {
+	cmd = sprintf ("find %s -type f -name %s -printf '%P\n' | sort -r", sq(BASEDIR), sq(bn(fn)));
+	while (cmd | getline p > 0) {
+		s = p;
+
+		# Remove the first directory if it's an archive.
+		if (isMirror == 0)
+			sub(/^[^\/]*\//, "", s);
+
+		if (s == fn)
+			hist[++n] = BASEDIR "/" p;
+		}
+
+	close (cmd);
+	return (n);
+	}
+
+function getLatest(fn,   n, hist) {
+	n = getHistory(fn, hist);
+	if (n > 0)
+		return (hist[1]);
+
+	return ("");
+	}
+
+function getVersion(fn, k,   i, n, m, hist) {
+	n = getHistory(fn, hist);
+	if (k == 0)
+		return (hist[1]);
+
+	m = length(BASEDIR) + 2;
+	for (i = 1; i <= n; i++) {
+		if (substr(hist[i], m)+0 == k)
+			return (hist[i]);
+		}
+
+	return ("");
+	}
+
+
+
+function finalizeBackup(   cmd, dir) {
+
+	printf ("%s", changeLog) >logFile;
+	close(logFile);
+
+	if (isMirror == 0) {
+		dir = BASEDIR "/" THISDIR;
+		if (versionName != "")
+			dir = dir "-" versionName;
+
+		if (movefile(WORKDIR, dir) != 0)
+			exit (1);
+		}
+
+	if (versionFile != "") {
+		printf ("%s\n", THIS) >versionFile;
+		close (versionFile);
+		}
+
+	return (0);
+	}
+
+
+function __init() {
+	FNAME  = 1;
+	FTYPE  = 2;
+	FPERM  = 3
+	FUSER  = 4;
+	FGROUP = 5;
+	FSIZE  = 6;
+	FTIME  = 7;
+	FARC   = 8;
+	_SPATH = 8;
+	_START = 9;
+
+	afOperations = "archive cat config copy create delete diff history" \
+			" help info last latest list modified mount next" \
+			" show test umount unmount version";
+	afOptions = "--debug --automount --config --copy-all --directory" \
+			" --finalize-on-error --file --force --keep-going" \
+			" --list-only --match --mode --name --quiet" \
+			" --read-filenames --show-commands --show-cmds" \
+			" --show-progress --source --sync" \
+			" --version --version-number --all-files" \
+			" --accept-errors";
+	return (0);
+	}
+
+
+function __getString(val) {
+	if (val == "-")
+		val = "";
+
+	return (val);
+	}
+
+function __getBool(val, line) {
+	if (val != "yes"  &&  val != "no") {
+		printf ("%s: boolean value expected: %s\n", program, line) >>STDERR;
+		exit (1);
+		}
+
+	return (val == "yes");
+	}
+
+function __setMode(p,   i, n, x) {
+	n = split(p, x, /[ ,]+/);
+	for (i = 1; i <= n; i++) {
+		if (x[i] !~ /^(mtp|mobile)$/)
+			error("unknown mode: " x[i]);
+
+		afFlags[x[i]] = 1;
+		}
+
+	n = asorti(afFlags, x);
+	p = "";
+	for (i = 1; i <= n; i++) {
+		if (x[i] != "")
+			p = p "," x[i];
+		}
+
+	afFlags[""] = substr(p, 2);
+	}
+
+
+function setConfig(fn) {
+	cf = fn;
+
+	CONF = dn(cf, ".");
+	if (CONF ~ /^\/dev\/?/  ||  fn ~ /\/null$/)
+		CONF = ".";
+
+	confToSource = 1;
+	}
+
+function adjustDirToConf(dir,   p) {
+	if (substr(dir, 1, 2) == "~/")
+		dir = ENVIRON["HOME"] substr(dir, 2);
+	
+	if (substr(dir, 1, 1) != "/") {
+		if (CONF != "") {
+			dir = CONF "/" dir;
+			gsub(/^(\.\/)+|(\/\.)+$/, "", dir);
+			if (dir == "")
+				dir = ".";
+			}
+		}
+
+	return (dir);
+	}
+
+
+
+# setKeepGoing() stores for which shell commands error code are
+# accepted.
+
+function setKeepGoing(p,   i, n, x) {
+	n = split(p, x, /[ ,]+/);
+	for (i = 1; i <= n; i++) {
+		if (x[i] == "-")
+			delete acceptErrors;
+		else
+			acceptErrors[x[i]] = 1;
+		}
+	}
+
+function addSource(dir, alias,   i, n, a, r, s, x) {
+	if (match(dir, /^(.*){([^}]*)}(.*)$/, x) > 0) {
+		r = x[1];
+		s = x[3];
+		if (x[2] == "") {
+			dir = r s;
+			}
+		else {
+			n = split(x[2], x, ",");
+			for (i = 1; i <= n; i++) {
+				a = x[i];
+				if (alias != "")
+					# match() matches the last {} first.
+					a = a "-" alias;
+
+				addSource(r x[i] s, a);
+				}
+
+			return (0);
+			}
+		}
+
+	# Get the alias if set.
+	if (match(dir, /(.*):([^:\/]+)$/, x) > 0) {
+		alias = x[2];
+		dir = x[1];
+		}
+
+	# Make sure we have an alias.
+	if (alias == "")
+		alias = bn(dir);
+
+	if (alias != "") {
+		# Aliases must be unique.
+		if (alias in sourceAlias) {
+			printf ("%s: alias exists: %s, dir= %s\n",
+					program, alias, dir) >>STDERR;
+			exit (1);
+			}
+
+		sourceAlias[dir] = alias;
+		}
+
+
+	if (sourceList != "")
+		multiSource = 1;
+	else {
+		# The first is special.
+		if (CONF == "") {
+			CONF = dir;
+			confToSource = 0;
+			}
+		}
+
+	# 2023-08-27/wzk: Do not adjust directories for MTP sources.
+	if (MTP == "")
+		dir = adjustDirToConf(dir);
+
+	if (sourceList == "")
+		SOURCE = dir;
+
+
+	if (sourceBase == "")
+		sourceBase = dn(dir);
+	else {
+		if (dn(dir) != sourceBase)
+			trueMultiSource = 1;
+		}
+
+	sourceList = sourceList dir "\n";
+	}
+
+
+
+# __rewriteSource() rewrites the indices (which are directories)
+# from sourceAlias[] when the source is an MTP address (i.e.,
+# have a _base_ directory below `/run/user/<uid>/gvfs`).
+
+function __rewriteSource(base,   i, n, dir, d2, sl, x) {
+	n = split(noctrl(sourceList), x, "\n");
+	for (i = 1; i <= n; i++) {
+		dir = x[i];
+		sub(/^\/+/, "", dir);
+		d2 = base "/" dir;
+
+		if (dir == sourceBase) {
+			sourceBase = d2;
+			}
+
+		sourceAlias[d2] = sourceAlias[dir];
+		delete sourceAlias[dir];
+
+		sl = sl d2 "\n";
+		}
+
+	sourceList = sl;
+
+	return (0);
+	}
+
+
+
+# function readMountPassword(gio,   line, proto, user, server, x) {
+# print "::", gio >>STDERR;
+# 	passwdFile = ENVIRON["HOME"] "/.archive-files.passwd";
+# 
+# 	# Extract protocol, username and server from the
+# 	# mount defintion.
+# 	if (match(gio, /(^([^:]+):\/\/)([^:@]+)(:([^@]+))?@(.*)$/, x) == 0)
+# 		return ("");
+# 
+# 	proto  = x[2];
+# 	user   = x[3];
+# 	server = x[6];
+# 	sub(/\/.*$/, "", server);
+# print ">>", proto, user, server >>STDERR;
+# 
+# 	while (getline line <passwdFile > 0) {
+# 		line = noctrl(line);
+# 		sub(/[\t ]*#.*$/, "", line);
+# 		if (line == "")
+# 			continue;
+# 
+# 		split(line, x, index(line, ":") > 0? ":": " ");
+# 		if (x[1] == proto  ||  (x[1] == ""  ||  x[1] == "*")) {
+# 			if (x[2] == server  &&  x[3] == user) {
+# 				mountPasswd[gio] = x[4];
+# 				break;
+# 				}
+# 			}
+# 		}
+# 
+# 	close (passwdFile);
+# print "**", mountPasswd[gio] >>STDERR;
+# 	return (mountPasswd[gio]);
+# 	}
+# 
+
+# extractGioPassword() checks if the mount defintion _gio_ contains
+# user:[domain:]password@server, and extracts the password from
+# the mount definition.  Any login data is stored in
+# gvfs_data[side, "auth"].  The function can be called multiple
+# times and is a no-op if no password is present.
+
+function extractGioPassword(gio, side,   pw, x) {
+	gvfs_data[side, "auth"] = "";
+
+	# Match something://user:passwd@... but not something://user@...
+	if (match(gio, /(^([^:]+):\/\/)([^:@]+):([^@]+)(@.*)$/, x) > 0) {
+
+		# x[4] is the password, possibly with smb domain
+		gvfs_data[side, "auth"] = x[4];
+		gsub(/:/, "\n", gvfs_data[side, "auth"]);
+
+		# The gio mount is in (x[1], x[3] and x[5])
+		gio = x[1] x[3] x[5];
+		}
+
+#	if ((pw = readMountPassword(gio)) != "")
+#		gvfs_data[side, "auth"] = gvfs_data[side, "auth"] pw;
+
+	if (gvfs_data[side, "auth"] != ""  &&
+	    substr(gio, 1, 4) == "smb:"  &&
+	    index(gvfs_data[side, "auth"], "\n") == 0) {
+		gvfs_data[side, "auth"] = "\n" gvfs_data[side, "auth"];
+		}
+
+	return (gio);
+	}
+
+
+# gio2dir() translates the gio mount definition _name_ into its
+# directory below /run/user/... and returns the directory path
+# or fails with an error message.
+
+function gio2dir(name, side,   k, limit, dir, cmd, line, x) {
+	name = extractGioPassword(name, side);
+
+	cmd = sprintf ("gio info %s 2>/dev/null", sq(name));
+	dir = "";
+
+	limit = 1;
+	if (autoMount == 1  &&  gvfs_data[side, "auth"] != "")
+		limit = 2;
+	else if (autoMount == "ask")
+		limit = 2;
+
+	k = 0;
+	while (dir == ""  &&  k <= limit) {
+		while (cmd | getline line > 0) {
+			line = noctrl(line);
+			if (substr(line, 1, 12) == "local path: ") {
+				dir = substr(line, 13);
+				break;
+				}
+
+			# Older gio versions work this way.
+			else if (match(line, /id::filesystem: (.*)$/, x) > 0) {
+				dir = sprintf ("/run/user/%d/gvfs/%s", userId, x[1]);
+				break;
+				}
+			}
+
+		close (cmd);
+		k++;
+
+		if (dir == ""  &&  k < limit) {
+
+			# Try to mount the location with the given
+			# credentials and search the directory again.
+
+			doMount("mount", side, 1);
+			continue;
+			}
+
+		if (k > 1  &&  dir != "")
+			gvfs_data[side, "auto_mounted"] = 1;
+		}
+
+	if (dir == "")
+		error("gvfs not mounted: " name);
+
+	return (dir);
+	}
+
+function readConfig(fn, section, haveDst, haveSrc, op,
+					lines, line, cmd, dir,
+					i, n, p, w, x,
+					inSection, haveSection) {
+	while (getline line <fn >0) {
+		lines++;
+
+		sub(/[ \t]*#.*$/, "", line);
+		line = skipws(noctrl(line));
+		if (line == "")
+			continue;
+
+		#
+		# Section starting here?
+		#
+
+		if (match(line, /^\[([-_a-zA-Z0-9]+)\]$/, x) > 0) {
+			inSection = tolower(x[1]);
+
+			if (section == inSection) {
+
+				# Reset some options.
+				BASEDIR = "";
+				GIO = "";
+				remoteLogin = "";
+				afConf["mirror"] = 0;
+				destType = "";
+
+				haveSection = 1;
+				}
+
+			continue;
+			}
+
+		if (inSection != ""  &&  section != inSection)
+			continue;
+
+
+
+
+		if (match(line, /^([-a-z]+)[ \t]+(.*)$/, x) == 0) {
+			printf ("%s: error in configuration file: %s\n", program, line) >>STDERR;
+			exit (1);
+			}
+
+		#
+		# Check for bad file format indicated by obsolete
+		# export option.
+		#
+
+		p = x[1];
+		if (p == "export")
+			error("export option is no longer supported");
+
+
+
+
+		#
+		# Configuration options
+		#
+
+		if (p == "dir"  ||  p == "directory"  ||  p == "dst") {
+			if (haveDst == 0)
+				BASEDIR = x[2];
+			}
+		else if (p == "gio") {
+			if (haveDst == 0)
+				GIO = x[2];
+			}
+		else if (p == "mtp") {
+			if (inSection != "")
+				error("not allowed in section: " p);
+
+			MTP = x[2];
+			}
+		else if (p == "auto-mount") {
+			if (x[2] == "ask")
+				autoMount = "ask";
+			else
+				autoMount = x[2] == "yes"? 1: 0;
+			}
+		else if (p == "sync-disks"  ||  p == "sync")
+			syncDisks = x[2] == "yes"? 1: 0;
+		else if (p == "follow-links")
+			followLinks = x[2] == "yes"? 1: 0;
+		else if (p == "follow-mounts")
+			followMounts = x[2] == "yes"? 1: 0;
+		else if (p == "verbose-shell"  ||  p == "show-cmds")
+			showShellCmds = x[2] == "yes"? 1: 0;
+		else if (p == "show-progress")
+			showProgress = x[2] == "yes"? 1: 0;
+		else if (p == "source"  ||  p == "src") {
+			if (inSection != "")
+				error("not allowed in section: " p);
+
+			if (haveSrc == 0)
+				addSource(x[2]);
+			}
+		else if (p == "omit") {
+			if (x[2] == ".")
+				_omitPattern = "";
+			else {
+				if (_omitPattern != "")
+					_omitPattern = _omitPattern "|";
+
+				_omitPattern = _omitPattern x[2];
+				}
+			}
+		else if (p == "editor")
+			historyEditor = x[2];
+		else if (p == "ignore")
+			ignoreFile[x[2]] = 1;
+		else if (p == "ignore-test")
+			ignoreTestFile[x[2]] = 1;
+		else if (p == "remote")
+			remoteLogin = __getString(x[2]);
+		else if (p == "history")
+			historyFile = __getString(x[2]);
+		else if (p == "version")
+			versionFile = __getString(x[2]);
+		else if (p == "accept-errors")
+			setKeepGoing(x[2]);
+		else if (p == "ignore-errors")
+			finalizeOnError = __getBool(x[2], line);
+		else if (p == "type") {
+			destType = getWord(x[2], x);
+			if (destType !~ /^(archive|mirror|\+read-only|\+backup)$/)
+				error("unsupported destination type: " destType);
+
+			if (destType == "archive") {
+				afConf["mirror"] = 0;
+				p = x[2];
+				}
+			else {
+				afConf["mirror"] = 1;
+				p = x[2];
+				if (destType == "+backup") {
+					if (getWord(p, x) == "-copy") {
+						backupMode = "-copy";
+						backupDest = x[2];
+						}
+					else {
+						backupMode = "cmd";
+						backupDest = p;
+						}
+
+					p = "";
+					}
+				}
+
+			if (p != "")
+				error("extra arguments present: " line);
+			}
+		else if (p == "af-mode"  ||  p == "mode")
+			__setMode(x[2]);
+
+		else if (p == "mirror")
+			afConf["mirror"] = __getBool(x[2], line);
+		else if (p == "file-list") {
+			afConf[p] = afConf[p] x[2] "\n";
+			_omitPattern = "";
+			}
+		else if (p == "file")
+			afConf[p] = afConf[p] x[2] "\n";
+
+		else
+			error("unknown configuration option: " p);
+		}
+
+	close (fn);
+
+	if (section != ""  &&  haveSection == 0)
+		error("section not found: " section);
+
+
+	#
+	# Finalize the configuration.
+	#
+
+	setIncludeFiles( afConf["file"]);
+	setIncludeFilesFromFile( afConf["file-list"]);
+
+	# 2023-08-27/wzk: Moved up.
+	if (sourceList == "")
+		addSource(".");
+
+
+	if ("mtp" in afFlags)
+		cpFlags = "--preserve=timestamps";
+		#cpFlags = "";
+
+	if ("mobile" in afFlags) {
+		if (sourceList == "")
+			error("no source directory set");
+		}
+
+
+	# Get the final omitPattern.
+	omitPattern = defaultOmitPattern;
+	if (_omitPattern != "") {
+		if (omitPattern != "")
+			omitPattern = omitPattern "|";
+
+		omitPattern = omitPattern _omitPattern;
+		}
+
+
+	#
+	# Check the configuration.
+	#
+
+	# Shortcut for vi, if nano becomes default.
+	if (substr(history, 1, 1) == "+") {
+		historyEditor = "+vi";
+		sub(/^\+ */, "", history);
+		}
+
+	#if (sourceList == "")
+	#	addSource(".");
+
+	if (MTP != "") {
+		if (op ~ /^(config|info|last|latest|mount|next|version)$/)
+			return (0);
+
+		dir = gio2dir(MTP, "mtp");
+		__rewriteSource(dir);
+		cpFlags = "--preserve=timestamps";
+		}
+
+	if (remoteLogin != "")
+		SOURCE = dn(fn, ".");
+
+	if (BASEDIR == "")
+		error("destination directory not set");
+	else if (GIO != "") {
+		if (substr(BASEDIR, 1, 1) == "/")
+			error("bad directory for GIO: " BASEDIR);
+
+		if (op == "mount")
+			return (0);
+
+		w = gio2dir(GIO, "gio");
+		if (w == "")
+			error("GIO not mounted: " GIO);
+
+		BASEDIR = w "/" BASEDIR;
+		cpFlags = "--preserve=timestamps";
+		}
+	else if (BASEDIR !~ /^(\/|\.\/)/) {
+		if (CONF != "")
+			BASEDIR = adjustDirToConf(BASEDIR);
+
+		if (remoteLogin == "")
+			excludeDir[BASEDIR] = 1;
+		}
+
+	if (0  &&  lines == 0) {
+		printf ("%s: configuration missing or empty: %s\n", program, fn) >>STDERR;
+		exit (1);
+		}
+
+	return (0);
+	}
+
+function __pv(o, v,   i, n, x) {
+	if (v != "") {
+		n = split( noctrl(v), x, "\n");
+		for (i = 1; i <= n; i++)
+			printf ("%-8s %s\n", o, x[i]);
+		}
+	}
+
+function printConfig(   p, i, n, x) {
+	__pv("gio", GIO);
+	__pv("dir", BASEDIR);
+
+	if (GIO != ""  ||  MTP != "")
+		printf ("\n");
+
+	__pv("mtp", MTP);
+	__pv("src", sourceList);
+	__pv("remote", remoteLogin);
+
+	__pv("type", destType);
+	__pv("backupMode", backupMode);
+	__pv("backupDest", backupDest);
+
+	printf ("\n");
+	__pv("file", afConf["file"]);
+	__pv("file-list", afConf["file-list"]);
+	__pv("omit", omitPattern);
+	__pv("history", historyFile);
+
+	printf ("\n");
+	__pv("af-mode", afFlags[""]);
+	__pv("sync-disks", syncDisks == 0? "no": "yes");
+	__pv("verbose", showShellCmds == 0? "no": "yes");
+
+	n = split("cp mkdir rm rmdir", x, " ");
+	for (i = 1; i <= n; i++) {
+		if (acceptErrors[x[i]] == 1)
+			p = p "," x[i];
+		}
+
+	__pv("accept-errors", substr(p, 2));
+
+	if (_verbose > 0) {
+		printf ("\n");
+		if (GIO != "") {
+			__pv(".basedir", BASEDIR);
+			__pv(".thisIndex", thisIndex);
+			}
+
+		__pv(".workdir", WORKDIR);
+		__pv(".thisdir", THISDIR);
+		}
+	}
+
+function cmdMatch(op, cmd,   i, n, len, x) {
+	if ((len = length(op)) == 0)
+		error("missing operation");
+
+	n = split(cmd, x, " ");
+	for (i = 1; i <= n; i++) {
+		if (substr(x[i], 1, len) == op)
+			return (x[i]);
+		}
+
+	return ("");
+	}
+
+
+function __getOpArg() {
+	while (argi < ARGC  &&  (op == ""  ||  section == "")) {
+		p = ARGV[argi];
+		if (section == ""  &&  p ~ /(^:|:$)/) {
+			section = tolower( nextarg("section"));
+			gsub(/(^:|:$)/, "", section);
+			}
+		else if (op == ""  &&  p ~ /^[a-z]+/)
+			op = nextarg("operation");
+		else
+			break;
+		}
+
+	return (op);
+	}
+
+function nextarg(par,   arg) {
+	if (argi >= ARGC) {
+		printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+		exit (1);
+		}
+		
+	arg = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (arg);
+	}
+
+
+function __getBoolVal(par, inv,   b) {
+	if (par == "yes")
+		b = 1;
+	else if (par == "no")
+		b = 0;
+	else
+		error(1, "bad boolean value: " par);
+
+	if (inv != 0)
+		b = 1 - b
+
+	return (b);
+	}
+
+function longOption(opt,   p, have_parameter, inv, par, x) {
+	have_parameter = 0;
+	inv = 0;
+	par = "yes";
+	if (substr(opt, 1, 5) == "--no-") {
+		inv = 1;
+		opt = "--" substr(opt, 6);
+		}
+
+	if (match(opt, /^(--[-a-z0-9]+)(=(.*))?$/, x) > 0) {
+		opt = x[1];
+		if (x[2] == "")
+			have_parameter = 0;
+		else {
+			have_parameter = 1;
+			if (x[3] != "")
+				par = x[3];
+			}
+		}
+	else {
+		error(2, "bad option: " opt);
+		}
+
+
+	if (opt == "--debug")
+		debug = __getBoolVal(par, inv);
+	else if (opt == "--all-files")
+		copyall = __getBoolVal(par, inv);
+	else if (opt == "--automount") {
+		if (par == "yes")
+			autoMount = 1;
+		else if (par == "no")
+			autoMount = 0;
+		else if (par == "ask")
+			autoMount = "ask";
+		else
+			error("bad option value: " par);
+		}
+	else if (opt == "--config"  ||  opt == "--file")
+		setConfig( have_parameter? par: nextarg("configuration file"));
+	else if (opt == "--copy-all")
+		copyall = __getBoolVal(par, inv);
+	else if (opt == "--directory")
+		BASEDIR = have_parameter? par: nextarg("archive directory");
+	else if (opt == "--finalize-on-error")
+		finalizeOnError = __getBoolVal(par, inv);
+	else if (opt == "--force")
+		forceCreation = __getBoolVal(par, inv);
+	else if (opt == "--keep-going"  ||  opt == "--accept-errors")
+		setKeepGoing( have_paremeter? par: nextarg("shell command list"));
+	else if (opt == "--list-only")
+		listonly = __getBoolVal(par, inv);
+	else if (opt == "--match") {
+		p = have_parameter? par: nextarg("filename pattern");
+		gsub(/:/, "|", p);
+		filePattern = filePattern \
+			(filePattern != ""? "|": "") p;
+			haveFilelist = "yes";
+		}
+	else if (opt == "--mode")
+		__setMode( have_parameter? par: nextarg("mode"));
+	else if (opt == "--name")
+		versionName = have_parameter? par: nextarg("version name");
+	else if (opt == "--quiet")
+		_verbose = __getBoolVal(par, 1 - inv);
+	else if (opt == "--read-filenames")
+		readFiles = __getBoolVal(par, inv);
+	else if (opt == "--show-commands") {
+		showCommands = __getBoolVal(par, inv);
+		if (showCommands != 0)
+			listonly = 1;
+		}
+	else if (opt == "--show-execution")
+		showShellCmds = __getBoolVal(par, inv);
+	else if (opt == "--show-cmds")
+		showShellCmds = __getBoolVal(par, inv);
+	else if (opt == "--show-progress")
+		showProgress = __getBoolVal(par, inv);
+	else if (opt == "--source")
+		addSource( nextarg("source directory"));
+	else if (opt == "--sync")
+		syncDisks = __getBoolVal(par, inv);
+	else if (opt == "--version") {
+		printf ("%s %s\n", program, pv);
+		exit (0);
+		}
+	else if (opt == "--version-number") {
+		print pv;
+		exit (0);
+		}
+
+	else
+		error("unknown option: " opt);
+
+	return (0);
+	}
+
+
+BEGIN {
+	program = "af";
+	OUT = STDERR = "/dev/stderr";
+
+	__init();
+	_verbose = 1;
+	copyall = -1;
+	debug = 0;
+	forceCreation = 0;
+	filePattern = "";
+	finalizeOnError = 0;
+	autoMount = 0;
+	readFiles = 0;
+	syncDisks = 0;
+	showCommands = 0;
+	showProgress = 0;
+
+	SOURCE = "";
+	multiSource = 0;
+	trueMultiSource = 0;
+	checkBase = 1;
+	setKeepGoing("rm,rmdir");
+
+	argi = 1;
+	if (argi < ARGC  &&  ARGV[argi] == "--")
+		nextarg(".");
+
+	op = __getOpArg();
+	while (argi < ARGC  &&  substr(ARGV[argi], 1, 1) == "-") {
+		options = nextarg("option");
+		if (options == "--")
+			break;
+
+		if (substr(options, 1, 2) == "--") {
+			longOption(options);
+			continue;
+			}
+
+		for (i = 2; i <= length(options); i++) {
+			c = substr(options, i, 1);
+			if (c == "d")
+				debug = 1;
+			else if (c == "a")
+				copyall = 1;
+			else if (c == "A") {
+				if (autoMount == 0)
+					autoMount = 1;
+				else
+					autoMount = "ask";
+				}
+			else if (c == "b")
+				forceCreation = 1;
+			else if (c == "c"  ||  c == "f")
+				setConfig( nextarg("configuration file"));
+			else if (e == "e")
+				finalizeOnError = 1;
+			else if (c == "h")
+				historyFile = nextarg("history file");
+			else if (c == "H")
+				historyText = nextarg("change description");
+			else if (c == "k")
+				setKeepGoing( nextarg("shell command list"));
+			else if (c == "l") {
+				if (listonly == 1)
+					showCommands = 1;
+
+				listonly = 1;
+				}
+			else if (c == "m")
+				__setMode( nextarg("mode"));
+			else if (c == "n")
+				versionName = nextarg("version name");
+			else if (c == "p") {
+				filePattern = filePattern \
+					(filePattern != ""? "|": "") nextarg("file pattern");
+				gsub(/:/, "|", filePattern);
+				haveFilelist = "yes";
+				}
+			else if (c == "q")
+				_verbose = 0;
+			else if (c == "r")
+				readFiles = 1;
+			else if (c == "s")
+				syncDisks = 1;
+			else if (c == "D")
+				BASEDIR = nextarg("archive directory");
+			else if (c == "S")
+				addSource( nextarg("source directory"));
+			else if (c == "v")
+				_verbose++;
+			else if (c == "x")
+				showShellCmds = 1;
+			else if (c == "z")
+				showProgress = 1;
+			else if (c == "X") {
+				printf ("%s\n%s\n", afOperations, afOptions);
+				exit (0);
+				}
+			else if (c == "V") {
+				if (options == "-VV")
+					print pv;
+				else
+					printf ("%s %s\n", program, pv);
+
+				exit (0);
+				}
+			else {
+				printf ("%s: unkown option: -%s\n", program, c) >>STDERR;
+				exit (1);
+				}
+			}
+		}
+
+
+	if (op == "") {
+		while (argi < ARGC) {
+			p = ARGV[argi];
+			if (p == "."  ||  p == ".."  ||  index(p, "/") > 0)
+				addSource( nextarg("source directory"));
+			else
+				break;
+			}
+		}
+
+	op = __getOpArg();
+	# print op, section, argi, ARGV[argi]; exit
+
+	if (op != ""  &&  argi < ARGC) {
+		# Look for post-operation long options.
+		while (argi < ARGC  &&  substr(opt, 1, 2) == "--") {
+			opt = nextarg("option");
+			longOption(opt);
+			}
+		}
+
+	if (argi >= ARGC) {
+		if (op == "") {
+			if (showCommands != 0)
+				op = "show";
+			else
+				op = "list";
+			}
+		}
+
+	#if (argi < ARGC)
+	#	print "** extra arguments on command line: " ARGV[argi] >>STDERR;
+
+
+	if ((op = cmdMatch(p = op, afOperations)) == "")
+		error("unknown operation: " p);
+
+
+	k = length(op);
+	if (substr("list", 1, k) == op  ||  substr("diff", 1, k) == op) {
+		listonly = 1;
+		if (substr("diff", 1, k) == op)
+			_verbose++;
+
+		OUT = "/dev/stdout";
+		}
+	else if (op == "test"  ||  op == "modified") {
+		listonly = 1;
+		test = 1;
+		}
+	else if (op == "last") {
+		_verbose--;
+		listonly = 1;
+		}
+	else if (op == "copy") {
+		if (filePattern == "") {
+			readFiles = 1;
+			haveFilelist = "copy";
+			}
+
+		if (copyall < 0)
+			copyall = 1;
+		}
+	else if (op == "show") {
+		listonly = 1;
+		showCommands = 1;
+		}
+	else if (substr("help", 1, k) == op) {
+		printf ("%s %s - archive files\n", program, pv);
+		printf ("\n");
+		printf ("  Usage: %s [<options>] [<op>]\n", program);
+		printf ("\n" \
+			"Operations are\n" \
+			"\n" \
+			"    archive		create a new version.\n" \
+			"    cat <fn>		print the last version of <fn>.\n" \
+			"    config		print major configuration options.\n" \
+			"    copy		copy files listed on stdin.\n" \
+			"    create		like archive: create a new version.\n" \
+			"    diff <fn>		show differences to latest version.\n" \
+			"    history <fn>	show archive history of file.\n" \
+			"    info <fn>		print information from the archive.\n" \
+			"    last		print directory of last version.\n" \
+			"    latest <fn>		print latest file in archive.\n" \
+			"    list		list modified files (default).\n" \
+			"    modified		test if differences exists.\n" \
+			"    mount [gio|mtp]	connect to the GIO mount.\n" \
+			"    next		print the next version number.\n" \
+			"    show		only show shell commands but don't execute.\n" \
+			"    unmount [gio|mtp]	disconnect from the GIO mount.\n" \
+			"    version		print the last version number.\n" \
+			"\n" \
+			"Configuration information is read from .archive-files.conf or the\n" \
+			"file set with -f.  See af(1) manpage for other command line options.\n" \
+			"\n");
+
+		exit (0);
+		}
+
+
+	if (cf == "")
+		setConfig("./.archive-files.conf");
+
+	readConfig(cf, section, BASEDIR != ""? 1: 0, SOURCE != "", op);
+	initArchive();
+	if (op == "config") {
+		printConfig();
+		exit (0);
+		}
+
+
+	if (readFiles != 0) {
+		haveFilelist = "yes";
+		while (getline p > 0) {
+			if (substr(p, 1, 2) == "./")
+				p = substr(p, 3);
+
+			if (p != "")
+				fileList[p] = 1;
+			}
+
+		if (op == "copy")
+			haveFilelist = "copy";
+		}
+
+
+	if (op == "last") {
+		printf ("%s\n", PREVDIR);
+		exit (0);
+		}
+	else if (op == "mount"  ||  op == "unmount"  ||  op == "umount") {
+		#p = MTP != ""? "mtp": "gio";
+		p = "gio";
+		if (GIO == ""  &&  MTP != "")
+			p = "mtp";
+
+		if (argi < ARGC)
+			p = nextarg("side");
+
+		exit( doMount(op, p, 0));
+		}
+	else if (op == "history") {
+		p = nextarg("filename");
+		n = getHistory(p, hist);
+		for (i = 1; i <= n; i++)
+			printf ("%s\n", hist[i]);
+
+		exit (0);
+		}
+	else if (op == "delete") {
+		doDelete();
+		exit (0);
+		}
+	else if (op == "info") {
+		p = nextarg("filename");
+		n = doInfo(p, result);
+		exit (0);
+		}
+	else if (op == "latest") {
+		while (argi < ARGC) {
+			p = nextarg("filename");
+			if ((fn = getLatest(p)) != "")
+				printf ("%s\n", fn);
+			}
+
+		exit (0);
+		}
+	else if (op == "version") {
+		printf("%s\n", PREV);
+		exit (0);
+		}
+	else if (op == "next") {
+		printf ("%s\n", THIS);
+		exit (0);
+		}
+	else if (op == "cat") {
+		n  = (argi + 1 < ARGC)? nextarg("version")+0: 0;
+		p = nextarg("filename");
+		if ((fn = getVersion(p, n)) == "") {
+			if (n > 0)
+				printf ("%s: no such file version: %d\n", program, n) >>STDERR;
+
+			exit (1);
+			}
+
+		if (op == "cat") {
+			while (getline line <fn > 0)
+				printf ("%s\n", line);
+
+			close (fn);
+			}
+
+		exit (0);
+		}
+	else if (op == "diff"  &&  argi < ARGC) {
+		n  = (argi + 1 < ARGC)? nextarg("version")+0: 0;
+		fn = nextarg("filename");
+		if ((latest = getVersion(fn, n)) == "") {
+			if (n > 0)
+				printf ("%s: no such file version: %d\n", program, n) >>STDERR;
+
+			exit (1);
+			}
+
+		cmd = "diff";
+		if (autopager == 0  ||  _system("tty -s <&1") != 0)
+			cmd = cmd sprintf (" %s %s", sq(latest), sq(fn));
+		else {
+			cmd = cmd sprintf (" --color=always %s %s | less -RXF",
+						sq(latest), sq(fn));
+			}
+
+		system (cmd);
+		exit (0);
+		}
+
+	# Update the history.
+	if (op == "test"  ||  listonly != 0  ||  showCommmands != 0)
+		;
+	else if (remoteLogin == "") {
+		if (updateHistory(historyText) != 0)
+			exit (0);
+		}
+
+	#
+	# Archiving starts here.
+	#
+
+	cmd = getFindCmd(sourceList);
+	if (remoteLogin != "")
+		cmd = sprintf ("ssh %s %s", sq(remoteLogin), sq(cmd));
+
+	n = readIndex(prevIndex);
+	if (isMirror != 0  &&  THIS == "")
+		THIS = n + 1;
+
+	getFiles(sourceList, sRec, cmd);
+
+	n = archiveFiles(sRec, pRec, cRec, remoteLogin != ""? 0: 1);
+	if (op == "list")
+		exit (0);
+
+	if (test != 0) {
+		if (n == 0) {
+			if (_verbose > 0)
+				printf ("unchanged\n");
+
+			exit (1);
+			}
+
+		if (_verbose > 0)
+			printf("changed\n");
+
+		exit (0);
+		}
+
+
+	#
+	# Create the shell commands from the file operations.
+	#
+
+	if (isMirror != 0  &&  destType != "+read-only") {
+		cmdlist = __getOperations("rm", 0, WORKDIR, "rm") \
+				__getOperations("rmdir", 1, WORKDIR, "rmdir");
+		}
+
+	cmdlist = cmdlist __getOperations("mkdir -p", 0, WORKDIR, "mkdir");
+	if (remoteLogin == "") {
+		# cmdlist = cmdlist __getOperations("cp " cpFlags, 0, WORKDIR, "cp");
+		p = __getOperations("cp " cpFlags, 0, WORKDIR, "cp");
+	if (errorLog == "")
+		cmdlist = cmdlist p;
+	else {
+		# Capture errors to log.
+		cmdlist = cmdlist "\nset +e\n" \
+			    "{ " skipws(p) "  } 2>&1 | tee " sq(errorLog) "\n" \
+			    "set -e\n" \
+			    sprintf("\ntest -s %s  &&\n" \
+				"  exit 1  ||\n" \
+				"  rm %s\n", sq(errorLog), sq(errorLog));
+			}
+		}
+	else {
+		cmdlist = cmdlist \
+				sprintf ("sftp -b - %s <<'EOF'\n", sq(remoteLogin)) \
+				__getOperations( (acceptErrors["cp"] == 1? "-": "") "get -p", 0, WORKDIR, "cp", 1) \
+				"EOF\n";
+		}
+
+	# Remove unecessary error handling changes.
+	gsub(/\nset -e\nset \+e\n/, "\n", cmdlist);
+
+
+	# Are there any files to backup?
+	if (fops["_"] == ""  ||  fops["_"] !~ /[^\/]\n/)
+		;
+	else if (destType == "+backup") {
+		if (backupMode == "-copy") {
+			if (substr(p = backupDest, 1, 1) != "/")
+				p = BASEDIR "/" p;
+
+			cmd = sprintf ("af -c /dev/null -S %s -D %s copy", sq(BASEDIR), sq(p));
+			}
+		else
+			cmd = backupDest;
+
+		cmd = cmd " <<'~EOF'\n" \
+			fops["_"] \
+			"~EOF\n";
+
+		cmdlist = cmd "\n" cmdlist;
+		}
+
+
+	# Create the temporary directory.
+	if (isMirror == 0) {
+		cmdlist = mkdir(WORKDIR, checkBase != 0, 1) \
+				cmdlist;
+		}
+
+	# Sync disks.
+	if (1  ||  syncDisks != 0)
+		cmdlist = cmdlist "sync\n";
+
+
+	if (op == "show"  ||  showCommands != 0) {
+		printf ("%s", cmdlist);
+		exit (0);
+		}
+
+
+	if (listonly != 0)
+		exit (0);
+
+	if (fops[""] == 0  &&  forceCreation == 0) {
+		verbose("no changes\n");
+		exit (0);
+		}
+
+
+	# Execute the commands.
+	if ((rc = doShell(cmdlist)) != 0) {
+		if (errorLog == "")
+			error("exit status: " rc);
+		else if (finalizeOnError == 0)
+			error("exit status: " rc ", see " errorLog);
+		else {
+			errorLog = BASEDIR "/" THISDIR substr(errorLog, length(WORKDIR) + 1);
+			printf ("\nerror occured, see %s\n", errorLog);
+			printf ("finalizing\n");
+			}
+		}
+		
+	n = writeIndex(thisIndex, THIS);
+	finalizeBackup();
+
+	exit (rc);
+	}
+
+END {
+	if (gvfs_data["gio", "auto_mounted"] == 1)
+		doMount("unmount", "gio", 1);
+
+	if (gvfs_data["mtp", "auto_mounted"] == 1)
+		doMount("unmount", "mtp", 1);
+	}
+

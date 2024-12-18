@@ -1,0 +1,93 @@
+.TH MOBA 1 "04 OCTOBER 2019"
+.SH NAME
+moba.sh \- mobile file archiver
+.SH SYNOPSIS
+\fBsh moba.sh\fR [\fIcmd\fR [\fIconfiguration ...\fR]]
+.PP
+.SH DESCRIPTION
+\fImoba.sh\fR is a wrapper around \fIaf\fR.
+It is intended to be installed on a removable (mobile) disk (e.g. a USB or MTP
+device or a network drive mounted via \fIsshfs\fR(1)) and run from there.
+.SS "Directory Structure"
+\fImoba.sh\fR does not need to be installed on the host where
+it is executed.
+Instead, it is run from the removable medium where \fImoba.sh\fR
+expects a certain directory structure, which is:
+.TP
+.B bin
+This directory contains at least \fImoba.sh\fR and \fIaf\fR.
+.TP
+.B conf
+This directory contains one directory for each host where \fImoba.sh\fR
+is run and the host-specific directory contains one file per
+configuration form that host.
+Configuration files must end with \fB.conf\fR.
+.TP
+.B data
+Every host gets its own directory here too (as for \fBconf\fR).
+Furthermore for each host configuration a separate directory is created
+where the data is stored.
+The directory name is derived from the name of the configuration file,
+e.g. the operations from the configuation file \fBarchive-files.conf\fR
+would go into the diectory \fBarchive-files\fR.
+.SS "Configuration"
+\fImoba.sh\fR configuration files are just regular \fIaf\fR configurations,
+see
+.IR af (1)
+for details.
+Differences are that any \fBdir\fR option from the configuration is
+ignored because this is set by \fImoba.sh\fR and that at least one
+source directory must be configured (\fBsrc\fR option).
+.PP
+If \fImoba.sh\fR is run from an MTP device \fIaf\fR's \fBmtp\fR flag
+should be set.
+In this mode \fIaf\fR will only copy files (and not try to preserve
+any meta-information from the file) and not report errors or warnings
+on the final renaming of the temporary directory which are normal
+for MTP devices.
+.PP
+The following example is a minimal configuration
+.PP
+.nf
+.RS
+src     /home/wzk/work/archive-files
+af-mode mtp
+.RE
+.fi
+.PP
+for an MTP device that archives all files from the source directory
+under \fBdata/\fR\fIhostname\fR\fB/archive-files\fR.
+See
+.BR af (1)
+for other configuration options.
+Add \fBsrc\fR options as required.
+.SS "Invocation"
+If no operation is given on the command line \fImoba.sh\fR prints
+all configurations for the current host (i.e., the configuration file
+names without the \fB.conf\fR extension).
+Otherwise \fImoba.sh\fR expects an \fIaf\fR operation which is passed
+to \fIaf\fR as-is.
+The only exception is \fBcopy\fR which becomes \fBcreate\fR.
+\fBconfig\fR, \fBcopy\fR, \fBlist\fR, \fBshow\fR and \fBtest\fR make
+most sense in \fImoba.sh\fR's context.
+.PP
+If an operation but no configuration is set on the command line
+then the operation is run for all available configurations.
+.PP
+.nf
+.RS
+sh moba.sh copy
+.RE
+.fi
+.PP
+archives all configured sources in a single operation.
+.SH "NOTES"
+\fImoba.sh\fR is distributed in its own \fItar.gz\fR archive.
+This creates the expected first and second level directory structure
+when unpacked.
+.PP
+.B Important:
+When you run \fImoba\fR from a \fBvfat\fR (or similar) USB disk you should
+keep in mind that \fBvfat\fR filenames are case-insensitive.
+.SH "SEE ALSO"
+.IR af (1).

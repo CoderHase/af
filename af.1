@@ -1,0 +1,584 @@
+.TH AF 1 "18 DECEMBER 2024"
+.SH NAME
+af \- archive files
+.SH SYNOPSIS
+\fBaf\fR \fIcmd\fR [\fIoptions\fR] [\fIpar\fR ...]
+.br
+\fBaf\fR [\fIoptions\fR] [\fIcmd\fR [\fIpar\fR ...]]
+.PP
+.SH DESCRIPTION
+\fIaf\fR is a very simple file archiver.
+Each time it is run to create (\fBcreate\fR operation) a new volume,
+\fIaf\fR makes a new directory in the configured destination,
+and copies all modified files to it.
+Volume directories are numbered (four digits with leading zero's
+followed by the creation date) and mirror the source directory structure
+as needed to store the files.
+.PP
+\fIaf\fR does not copy the files on its own.
+Instead, it creates the necessary \fIcp\fR(1) and \fImkdir\fR(1) commands
+and executes them by passing them to \fIsh\fR(1).
+Commands may be examined with the \fBshow\fR operation.
+.PP
+\fIaf\fR does not use a database and does not store files as diffs.
+File status information (i.e. file size and last modification date) is
+recorded in a status file (\fI.archive.tab\fR) and file operations are
+computed based on the comparison of that information with the present
+file's status.
+.PP
+\fIaf\fR implements some commands to retrieve information from the
+archive, see \fBOPERATIONS\fR below.
+\fBrestore-files\fR(1) (located in \fI/usr/lib/af\fR) can be used to
+restore (parts of) of a particular volume.
+.PP
+Running \fIaf\fR without parameters shows a list of all files that have
+been modified since the last volume was created.
+These are the files that would be copied into a new volume.
+.SS "Configuration File"
+If no configuration file is set with the \fB-c\fR option on the
+command line \fIaf\fR reads configuration information from
+\fI.archive-files.conf\fR in the current directory.
+.PP
+In case you are not sure what the effective configuration is or what
+\fIaf\fR is going to do use
+.PP
+    $ af config
+.PP
+to see the most important configuration options and
+.PP
+    $ af show
+.PP
+to get the list of commands that \fIaf\fR would execute to create a
+new archive.
+.SS "Configuration Sections"
+Configuration files may have sections to contain several configuration
+definitions for the same source location.
+Section names appear on one line, enclosed in angle brackets:
+.PP
+    dir     /var/backups/my-user-name/archive-files
+
+    [backup]
+    dir     /some/other/directory
+.PP
+Sections inherit some parts from the main configuration (e.g.
+\fBomit\fR) but the destination settings (destination directory,
+destination type, GIO mount and remote login) are cleared.
+The section is activated from the command line by giving the
+section's name followed by a colon.
+.PP
+    $ af list backup:
+.PP
+The section name may appear before or after the operation parameter.
+.SS "Destination Directory"
+The only mandatory configuration option is the destination directory.
+It is either set with the \fB-D\fR command line option or using
+\fBdir\fR in the configuration file.
+.PP
+    dir /var/backups/my-user-name/archive-files
+.PP
+\fBdirectory\fR and \fBdst\fR are aliases.
+.SS "Source Directories"
+The source directory is configured by either \fBsrc\fR in the
+configuration file or the \fB-S\fR command line option.
+(The \fB-S\fR option is meant to be used from within scripts but not in
+normal user interaction.)
+If no source directory is configured the current directory is used.
+.PP
+    src /home/my-user-name/work/archive-file
+.PP
+\fIaf\fR can work with multiple source directories but rearranges them
+to appear below a common directory in the archive by inserting alias
+names.
+Aliases may be computed automatically or set by the configuration by
+appending the directory alias separated with a colon.
+.PP
+    src /home/my-user-name/work/archive-file
+    src /home/my-user-name/work/ssc
+    src /home/my-user-name/work/http-server:https
+.PP
+The first two line define source directories without an explicit alias.
+\fIaf\fR uses the directory's name (\fIarchive-file\fR and \fIssc\fR) for
+it.
+The third line sets another source with the alias \fIhttps\fR.
+.PP
+Source directories may be set also by brace grouping:
+.PP
+    src /home/my-user-name/work/{archive-files,ssc,http-server:https}
+.PP
+and multiple brace groups may appear in a \fBsrc\fR option.
+.SS "Relative Directories"
+If source directories are set as relative pathnames (directories that do
+not start with a slash \fB/\fR) and the configuration file is already set
+then the source directory is made relative to the directory of
+the configuration file (by inserting that directory as prefix).
+Source directories starting with \fB~/\fR are relative to the user's
+\fBHOME\fR directory.
+.PP
+The same adjustment is done for relative destination directories.
+.PP
+If in doubt check with \fIaf\fR's \fBconfig\fR operation.
+.SS "Mirror Destinations"
+\fIaf\fR's default is to store files in archives where modified files go
+into a new volume preserving old files.
+Mirror destinations - files are copied as-is into a single destination
+directory tree without volumes - can be configured using the \fBtype\fR
+configuration option.  The possible configuration values are
+.TP
+\fBarchive\fR
+sets the archive mode, which is the default.
+.TP
+\fBmirror\fR
+switches to a mirror mode (instead of creating an archive).
+.TP
+\fB+read-only\fR
+configures a mirror but delete commands are not executed on the mirror.
+.TP
+\fB+backup\fR \fB-copy\fR \fIdir\fR | \fIcmd\fR [\fIarg\fR \fI...\fR]
+configures a mirror but all files that would be overwritten or deleted
+are backed-up somewhere.
+With \fB-copy\fR the files are saved in an \fIaf\fR archive in \fIdir\fR.
+If instead \fIcmd\fR is given it is run and it receives the filenames
+on it's standard input.
+.SS "GIO Destinations"
+Non-local destination directories (e.g. locations on a network
+storage) can be configured with the \fBgio\fR option.
+The option's argument must be a valid \fIgio\fR(1) mount definition and
+the configured destination directory (\fBdir\fR) is a directory below
+that mount and may not start with a slash.
+.PP
+    [network]
+    gio     smb://my-user@network-server.local/home
+    dir     network-store/backups/archive-files
+.PP
+\fIaf\fR doesn't mount the remote location automatically.
+If the remote location is not connected by some other mechanism,
+\fIaf\fR's \fBmount\fR and \fBunmount\fR operations may be used
+to connect to or disconnect from it.
+.SS "MTP Devices"
+\fIaf\fR supports non-local source directories with the \fBmtp\fR
+option.
+It works very much as \fBgio\fR but for the source side: any configured
+\fBsrc\fR directory is located below the \fIgio\fR(1) mount definition
+set with \fBmtp\fR.
+.PP
+    dir     ~/phone-backup
+
+    mtp     mtp://phone-identifier
+    src     Interner gemeinsamer Speicher/DCIM/Camera:camera
+    src     Interner gemeinsamer Speicher/Pictures:pictures
+.PP
+The \fBmount\fR and \fBunmount\fR operations can be used to connect to
+or disconnect from the location.
+This is (usually) not required for MTP devices but the \fBmtp\fR
+option may be used to connect to network drives too.
+The \fIphone-identifier\fR can be obtained by connecting the phone
+to the computer and auto-mounting it.
+.PP
+.SS "Progress Information"
+When working with remote filesystems \fIaf\fR operation may slow
+down depending on network speed and number of files to process.
+In that case the \fBshow-progress\fR configuration (or equivalent
+comamnd line) option can be used to show progress when searching and
+copying files.
+.PP
+.SS "Mount Authentication Information"
+Authentication information for remote destination (gio) or source (mtp)
+locations can be passed in the location identifier by appending a
+colon `:` and the password to the username: 
+.sp
+  proto://username:password@server/...
+.sp
+Domain information for \fBsmb\fR locations in inserted between username
+and password and may be omitted when empty.
+.sp
+\fBNotice:\fR Storing login credentials in unprotected files is a bad
+idea.
+Do this only if you have a clear use case (i.e. automatic updates of or
+to remote locations) and considered the implications for account
+security.
+Never use this feature for convenience.
+.SS "Remote Source Locations by ssh"
+\fIaf\fR can copy files from remote \fIssh\fR servers without
+mounting them as MTP device first.
+The \fBremote\fR option must be set, which expects an argument
+of the form \fIuser\fR@\fIhost\fR.
+\fIaf\fR uses then a combination of \fIssh\fR(1) and \fIsftp\fR(1)
+commands to fetch files from the configured locations from \fBhost\fR.
+This operation mode should be used with \fIssh\fR(1) key authentication
+since multiple logins are done.
+.SS "Restoring Files"
+Files can be restored with the command
+.PP
+  restore-files \fIvolume-dir\fR/.archive.tab [\fIpattern\fR]
+.PP
+\fIrestore-files\fR lists the commands that must be executed
+by piping them to \fIsh\fR(1) to restore the files.
+Additional command line parameters are interpreted as regular expressions:
+Only files matching one of the expressions are restored.
+If an expression starts with a minus (\fB-\fR) the filename must not match
+any of the veto patterns.
+The script is stored in the directory \fI/usr/lib/af\fR.
+\fIrestore-files\fR display usage information if run without
+arguments.
+.SH "CONFIGURATION"
+\fIaf\fR reads its configuration information from the file
+\fI.archive-files.conf\fR in the first source directory.
+If no source is set on the command line \fIaf\fR uses the current
+directory for it.
+The only mandatory option is \fBdir\fR.
+.TP
+\fBaccept-errors\fR \fIcmdlist\fR
+Define a commma-separated list of commands for which exit-codes
+other that 0 are accepted when copying files.
+Possible commands are \fBcp\fR, \fBmkdir\fR, \fBrm\fB and
+\fBrmdir\fR.
+The default value is `rm,rmdir` which are used for mirror
+destinations.
+The list can be cleared with a \fB-\fR.
+.TP
+\fBaf-mode\fR \fIflags\fR
+Set one of \fIaf\fR's operation flags.
+\fBmtp\fR copies only files without trying to preserve persissions, ownership
+or modifacation time and supresses error messages when renaming the
+temporary archive directory.
+When \fBmobile\fR is set then a source directory must be configured.
+.br
+(Both flags are used by \fImoba\fR(1).)
+.TP
+\fBauto-mount\fR \fBno\fR|\fByes\fR|\fBask\fR
+If \fByes\fR \fIaf\fR mounts GIO or MTP locations automatically
+(that is: without running `af mount` first) if login information is
+included in the configuration file.
+If the option value is \fBask\fR \fIaf\fR lets \fIgio\fR ask for
+authentication data.
+.br
+The default is \fBno\fR.
+Locations that are automatically mounted are also unmounted when \fIaf\fR
+terminates.
+.TP
+\fBdir\fR \fIpath\fR
+Set the archive base directory.
+Each new version (volume) get's its own subdirectory below \fIpath\fR.
+\fBeditor\fR \fIcmd\fR
+Use \fIcmd\fR to edit the history file.
+If \fIcmd\R starts with a \fB+\fR the editor's exit status must be
+\fB0\fR to continue with the operation.
+.TP
+\fBgio\fR \fIlocation\fR
+Define the archive base directory to be below the configured
+\fIgio\fR(1) mount specification \fIlocation\fR.
+When \fBgio\fR is configured, the archive base directory must not
+begin with a slash.
+.TP
+\fBhistory\fR \fIfile\fR
+If set then each time a new volume is created \fIfile\fR is loaded into
+\fIvi\fR to edit the version notes.
+Leaving \fIvi\fR with a non-zero exit code (try `:cq') cancels the
+operation.
+.TP
+\fBfile\fR \fIfilename\fR|\fB~\fR\fIregex\fR
+Add a file by its name or all files matching \fIregex\fR to \fIaf\fR's
+list of files.
+If the list of files contains at least one file or regex then only
+files matching the list are processed.
+.TP
+\fBfile-list\fR \fIfile\fR
+Read files to add to \fIaf\fR' filelist from \fIfile\fR.
+Each line contains one parameter for the \fBfile\fR configuration option.
+Blank lines and comments (starting with a \fB#\fR) are ignored.
+.TP
+\fBfollow-links\fR \fBno\fR|\fByes\fR
+Follow symbolic links when searching for files.
+(Sets \fIfind\fR(1) option \fB-L\fR.)
+.TP
+\fBfollow-mounts\fR \fBno\fR|\fByes\fR
+List files in mounted directories.
+(Sets \fIfind\fR(1) option \fB-mount\fR.)
+.TP
+\fBignore\fR \fIfile\fR
+Exclude \fIfile\fR from archival.
+.TP
+\fBignore-test\fR \fIfile\fR
+Ignore \fIfile\fR when checking for file modifications.
+.TP
+\fBmirror\fR \fBno\fR|\fByes\fR
+Configure the destination as mirror instead of an archive (default).
+See also \fBtype\fR below.
+.TP
+\fBmtp\fR \fIdevice\fR
+Make all configured \fBsrc\fR directories to appear below the
+\fIgio\fR(1) mount point \fIdevice\fR.
+.TP
+\fBomit\fR \fIregexp\fR
+Define a regular expression for file exclusion; files that match are ignored.
+\fBomit\fR may be set multiple times and all patterns are combined
+together.
+.TP
+\fBremote\fR \fIuser\fR@\fIhost\fR
+Set the \fIssh\fR(1) login and host for remote source directories.
+.TP
+\fBshow-cmds\fR \fBno\fR|\fByes\fR
+Print shell commands as they are executed.
+.TP
+\fBshow-progess\fR \fBno\fR|\fByes\fR
+Show name of file as it is copied.
+.TP
+\fBsrc\fR \fIdir\fR
+Set a source directory and can be used multiple times.
+.TP
+\fBsync-disks\fR \fBno\fR|\fByes\fR
+Sync disks when all files are copied.
+.TP
+\fBtype\fR \fBarchive\fR | \fBmirror\fR | \fB+read-only\fR | \fB+backup\fR
+Set the destination type; \fBarchive\fR is the default.
+.PP
+In addition to the configurable file exclusion, \fIaf\fR omits
+files if their name ends with \fB.tmp\fR or \fB.swp\fR
+or if their name contains a \fB~\fR or \fB$\fR.
+Futhermore, files matching the regular expression
+\fB(^out(.[0-9])?|^cut$)\fR are omitted too.
+.PP
+.SS "Configuration Sections"
+\fIaf\fR supports configurations for different destinations in a
+single file.
+Each destination is configured in it's own section that starts with
+\fB[\fR\fIname\fR\fB]\fR.
+Section names are case-insensitive.
+Sections inherit settings from the global configuration (options
+before the first section).
+However, the \fBdir\fR, \fBgio\fR, \fBmirror\fR and \fBtype\fR
+options are cleared and must be set within the section.
+The \fBsrc\fR option cannot be set in a section.
+.PP
+The configuration of a section is applied if its name is added
+to the command with a colon pre- or appended.
+`list \fB:\fR\fIname\fR' or `list \fIname\fR\fB:\fR' list
+the modified files in comparison to the destination configured
+in the section \fIname\fR.
+(Section name and operation may also be swapped.)
+.SH "OPERATIONS"
+\fIaf\fR uses the command line as user interface to create new volumes
+and query information about the archived files.
+The operation names may be abbreviated (or tab completed if installed).
+If more than one operation matches an abbreviation the first is used,
+e.g. \fBc\fR matches \fBcat\fR, \fBcopy\fR and \fBcreate\fR and is
+substituted with the first.
+.TP
+\fBcat\fR \fIfn\fR
+print the last archived version of \fIfn\fR.
+.TP
+\fBconfig\fR
+shows some major parameters from \fIaf\fR's configuration.
+.TP
+\fBcopy\fR
+creates a new volume but ignores any file modification information copying
+only the files \fIaf\fR reads on stdin. 
+The \fBcopy\fR operation is called by \fIaf\fR to
+backup files before they are modified or deleted.
+.TP
+\fBcreate\fR
+creates a new volume if changes exist.
+If the option \fB-f\fR is set a new volume is created in any case.
+.TP
+\fBdiff\fR [\fIversion\fR] \fIfile\fR
+shows the diff between the current file and either the latest or the given
+version of that file.
+.TP
+\fBinfo\fR \fIfn\fR
+prints status information about the archived versions of \fIfn\fR.
+If \fIfn\fR is prefixed with a \fB~\fR, \fIfn\fR is used
+as regular expression and
+information is returned for all files with a matching filename.
+.TP
+\fBlast\fR
+prints the last volume directory.
+.TP
+\fBlatest\fR \fIfile\fR \fI...\fR
+prints the latest versions of \fIfile\fR.
+.TP
+\fBlist\fR
+list the modified files.
+This is the default operation if no operation is given on the command line.
+.TP
+\fBmodified\fR
+tests if there are any modified files.
+\fIaf\fR returns the exit 0 if files are modified and 1 otherwise.
+.TP
+\fBmount\fR [gio|mtp]
+connects to the configured \fBgio\fR or \fBmtp\fR location.
+.TP
+\fBnext\fR
+prints the next version number.
+.TP
+\fBshow\fR
+show but don't execute the shell commands to create the archive.
+.TP
+\fBunmount\fR
+disconnects from the configured \fBgio\fR location.
+.TP
+\fBversion\fR
+prints the current version number.
+.PP
+When copying files \fIaf\fR stops if an error occurs.
+The configuration options \fBaccept-errors\fR can be used to
+override that.
+.SH "FILES"
+\fIaf\fR creates a file status information in every archive directory.
+This file is named \fI.archive.tab\fR and used to compute the file status
+the next time \fIaf\fR is run.
+\fI.archive.tab\fR is a plain-text file.
+Every line describes the status of one file and the fields are
+tab-separated.
+The fields are:
+.PP
+  - source file's filename,
+  - filetype; either \fBf\fR for a file or \fBd\fR for a directory,
+  - file permissions (symbolic),
+  - file owner,
+  - file group,
+  - size in bytes,
+  - file's last modification timestamp, and
+  - file's latest version relative to the archive's base.
+.PP
+\fIaf\fR uses the latest \fI.archive.tab\fR it can find in the archive 
+when computing which files changed.
+.SH OPTIONS
+\fIaf\fR supports short and long options.
+If a short option expects a parameter then next non-option command
+line parameter is taken, e.g. \fB`af -fa test.conf`\fR.
+.PP
+Parameters to long options can be given together with the option,
+separated by an equal sign \fB=\fR or as next command line argument,
+e.g. \fB`--file=test.conf`\fR or \fB`--file test.conf`\fR.
+Boolean values are \fByes\fR and \fBno\fR with \fByes\fR being the
+default if the value is missing and \fBno\fR can be set as option
+prefix, e.g. \fB`--debug=no`\fR or \fB`--no-debug`\fR.
+.TP
+\fB-a\fR
+only for \fBcreate\fR operation: copies all files.
+.TP
+\fB-A\fR | \fB--automount\fR
+auto-mount \fBgio\fR and \fBmtp\fR locations if passwords are present.
+If \fB-A\fR is set twice \fIaf\fR asks for passwords if required.
+Auto-mounted locations are unmounted when \fIaf\fR ends.
+.TP
+\fB-b\fR | \fB--force\fR
+force \fIaf\fR to create a new version even if no file changed.
+.TP
+\fB--copy-all\fR
+The \fBcreate\fR operation copies all files (not only modified),
+like \fB-a\fR.
+When \fB--no-copy-all\fR is set for \fBcopy\fR then only modified
+files are copied (not all).
+.TP
+\fB-f\fR | \fB--config\fR \fIfile\fR
+set the configuration file.
+.TP
+\fB-d\fR | \fB--debug\fR
+print debug information.
+.TP
+\fB-D\fR | \fB--directory\fR \fIdir\fR
+set the archive's base directory.
+If this option is set \fIaf\fR ignores the \fBdir\fR option
+in the configuration file.
+.TP
+\fB-h\fR \fIhistory-file\fR
+set the archive's history file.
+.TP
+\fB-H\fR \fIhistory-text\fR
+insert \fIhistory-text\fR into the archive's history file.
+.TP
+\fB-k\fR | \fB--keep-going\fR \fIcmdlist\fR
+set the shell commands for which exit codes other than 0 are accepted.
+\fIcmdlist\fR is a comma separated list of \fBcp\fR, \fBmkdir\fR, \fBrm\fR,
+\fBrmdir\fR or \fB-\fR accepting errors from that command.
+The default is \fBrm,rmdir\fR which can be cleared with \fB-\fR.
+.TP
+\fB--list-only\fR
+list only modified files.
+.TP
+\fB-n\fR | \fB--name\fR \fIname\fR
+append \fIname\fR to the volume's directory.
+.TP
+\fB-p\fR | \fB--match\fR \fIregex\fR
+set one or more colon separated regular expressions that filename must
+matched to be processed.
+Filenames which do not match are considered unchanged.
+.TP
+\fB-q\fR | \fB--quiet\fR
+reduce the informative output.
+.TP
+\fB-r\fR | \fB--read-files\fR
+read filenames to process from stdin.
+All other files are considered unchanged.
+.TP
+\fB-s\fR | \fB--sync\fR
+sync disks when finished.
+.TP
+\fB--show-commands\fR
+show shell commands but do not execute.
+.TP
+\fB--show-progress\fR
+show progress information as files are copied.
+.TP
+\fB-S\fR | \fB--source\fR \fIdir\fR
+set the source directory.
+.TP
+\fB-V\fR | \fB--version\fR
+print \fIaf\fR's version and exit.
+.TP
+\fB-x\fR | \fB--show-cmds\fR
+show shell commands as they are executed.
+.PP
+.SH "EXAMPLES"
+The following sample \fI.archive-files.conf\fR
+.PP
+.nf
+.RS
+dir       /var/backups/my-user-name/some-directory
+history   HISTORY
+omit      \\.(tar|gz|tgz|deb|zip)$
+.RE
+.fi
+.PP
+archives all files in the current directory and below in
+\fIsome-directory\fR but omits the usual file-archive types.
+.PP
+.nf
+.RS
+[net]
+gio       smb://user@server/share
+dir       backups/another-directory
+.RE
+.fi
+.PP
+adds a GIO configuration to write files to a samba server.
+.PP
+  $ af mount net:
+  $ af list net:
+.PP
+connects to the remote location and lists the modified files.
+.SH "BUGS"
+It is not a bug that \fIaf\fR doesn't care about empty directories.
+\fIaf\fR's scope are files and it creates directories as they are needed,
+i.e. when they contain files.
+.SH NOTES
+\fIaf\fR comes with additional scripts (see below), which are located
+in \fI/usr/lib/af\fR.
+.PP
+Functionality of some options and operations overlap, e.g.
+\fBlist\fR and \fB--list-only\fR for backward compatibility.
+It is recommended to prefer options.
+.PP
+\fIaf\fR does not copy files on its own.
+Instead, it creates shells operations for it any they can be verified
+with the \fB--show-commands\fR option executing them.
+(Do not mix that option with \fB--show-cmds\fR which shows the
+commands as they are executed.)
+.PP
+\fIaf\fR requrires \fIgawk\fR(1).
+.SH "SEE ALSO"
+.IR moba (1),
+.IR delete-files (1),
+.IR extract-volumes (1),
+.IR restore-files (1).

@@ -1,0 +1,35 @@
+
+_archive_files()
+{
+	local	s cur prev exp list
+
+	COMPREPLY=()
+	cur=${COMP_WORDS[COMP_CWORD]}
+	prev=${COMP_WORDS[COMP_CWORD-1]}
+	s=${COMP_WORDS[0]}
+
+	# if [ ${#COMP_WORDS[@]} '=' 1 -o ${#COMP_WORDS[@]} -le 2 ]; then
+	if [ "${cur#-}" != "$cur" ]; then
+		exp=opt
+	elif [ ${#COMP_WORDS[@]} -le 2 ]; then
+		exp=cmd
+	else
+		exp=file
+	fi
+
+	case $exp in
+	  cmd|opt)
+		list=`$s -X`
+		COMPREPLY=( $(compgen -W "$list" -- $cur) )
+		;;
+
+	  file)
+		COMPREPLY=( $(compgen -A file -- $cur) )
+		;;
+	esac
+
+	return
+}
+
+complete -F _archive_files -o filenames af
+

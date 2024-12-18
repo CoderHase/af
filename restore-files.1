@@ -1,0 +1,63 @@
+.TH RESTORE-FILES 1 "10 NOVEMBER 2021"
+.SH NAME
+restore-files \- restore files from af archive
+.SH SYNOPSIS
+\fBrestore-files\fR [\fBoptions\fR] \fIindexfile\fR [\fIpattern\fR  ...]
+.SH DESCRIPTION
+\fIrestore-files\fR read the \fIaf\fR(1) archive index and prints
+shell commands to restore files in the current directory.
+\fIrestore-files\fR does not copy files or create directories on its
+own.
+Instead, the output must be piped into \fIsh\fR(1) to perform the
+operations.
+The optional regular expressions \fIpattern\fR select or - if starting
+with a \fB-\fR - unselect files to be restored.
+.SH OPTIONS
+.TP
+\fB-b\fR
+create backups if restoring files would overwrite existing files in
+the destination directory.
+.TP
+\fB-d\fR \fIdir\fR
+restore files into \fIdir\fR instead of the current directory.
+.TP
+\fB-f\fR
+compute commands even if index-file looks bad formatted.
+.TP
+\fB-o\fR
+restore file owner, requires root permission.
+.TP
+\fB-p\fR
+restore file permissions with \fIcp\fR(1) instead of an additional
+\fIchmod\fR(1).
+.TP
+\fB-s\fR
+create one operation per line.
+.TP
+\fB-u\fR
+restore files only if they are missing in the destination or
+or if the existing file is older than the one in the archive.
+.TP
+\fB-x\fR \fIwhat\fR
+set operations to exclude: \fBd\fR does not change directory
+permissions and \fBp\fR does not set or preserve file permissions.
+.TP
+\fB-v\fR
+create verbose \fIcp\fR(1) commands.
+.TP
+\fB-z\fR
+use a shell variable for the base directory.
+.PP
+Options \fB-b\fR, \fB-p\fR, \fB-u\fR and \fB-v\fR are implemented
+as cp(1) options.
+The -p option may be used when the archive lives on a UNIX filesystems
+(i.e. the file system is not a remote network share, an MTP device, vfat
+USB disk etc.) and the archived files have the original file
+permissions.
+.SH "NOTES"
+\fIresttore-files\fR is located in \fI/usr/lib/af\fR.
+.SH "SEE ALSO"
+.IR af (1),
+.IR delete-files (1),
+.IR extract-volumes (1),
+.IR moba (1).
