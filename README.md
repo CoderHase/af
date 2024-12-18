@@ -24,15 +24,20 @@ See the manpages for documentation.
 
 ### Installation
 
-_af_ and its scripts can be installed from the Debian archive or by
-running `sudo make -f af.makefile install`.  Execute first with `-n` to
-see what make is going to do.
+_af_ is installed with the script _make-install_.  It's parameter is
+usually _/bin_ or _/usr/bin_ and the script construct commands to
+install the file in the expected locations:
 
-_af_ supports _bash_'s tab-completion but the relevant file is not
-copied by the above _make_ command.  You have to install it on your own
-with `sudo cp bc.archive-files /etc/bash_completion.d`. 
+    $ ./make-install /usr
 
-For _moba_ the zip archive is extracted on the removable media.  The
-_moba_ zip is included in the Debian package and located in
-_/usr/lib/af_.
+The output must be piped to `sudo sh`.  Additionally, the script
+_uninstall_ is stored in _lib/af_ which removes the installes files.
 
+The mobile archives _moba.sh_ is installed from the output of
+_lib/af/install-moba_.  The destination directory can be supplied as
+command line parameter and _._ is assumed if it's missing.  The
+commands can be inspected and must be piped to a shell interpreter.
+
+    $ /usr/lib/af/install-moba | sh
+
+Superuser permissions are usually not required.

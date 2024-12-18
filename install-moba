@@ -1,0 +1,134 @@
+#!/bin/sh
+#
+
+make_script() {
+    /usr/bin/awk '#
+
+	function error(s) {
+		printf ("%s: %s\n", program, s) >>STDERR;
+		exit (1);
+		}
+
+	function noctrl(s) {
+		sub(/[ \t\r\n]+$/, "", s);
+		return (s);
+		}
+
+	function sq(string) {
+		gsub(/'\''/, "'\''\\'\'''\''", string);
+		string = "'\''" string "'\''";
+		return (string);
+		}
+
+	function make_directories(dest, list,   i, n, p, s, x) {
+		n = split(list, x, ":");
+		for (i = 1; i <= n; i++)
+			p = p " " sq(dest "/" x[i]);
+
+		p = substr(p, 2);
+		if (p != "")
+			s = sprintf ("mkdir -p %s\n", p);
+
+		return (s);
+		}
+
+	function copy_files(from, to, list,   i, n, p, s, x) {
+		n = split(list, x, ":")
+		for (i = 1; i <= n; i++) {
+			p = p " " sq(from "/" x[i]);
+			}
+
+		p = substr(p, 2);
+		if (p != "") {
+			s = sprintf ("cp --preserve=timestamps %s %s\n",
+				p, sq(to));
+			}
+
+		return (s);
+		}
+
+	function make_manpages(dir, dest, list,   i, n, p, x) {
+		n = split(list, x, ":")
+		for (i = 1; i <= n; i++) {
+			p = p " " sq(x[i]);
+			}
+
+		p = substr(p, 2);
+		if (p != "") {
+			s = sprintf("for F in %s\n" \
+				"do\n" \
+				"  N=$(basename $F .1)\n" \
+				"  man \"%s/$F\" >%s/$N-1.txt\n" \
+				"done\n", p, dir, sq(dest))
+			}
+
+		return (s);
+		}
+
+	function nextarg(par,   arg) {
+		if (argi >= ARGC) {
+			printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+			exit (1);
+			}
+
+		arg = ARGV[argi];
+		ARGV[argi++] = "";
+
+		return (arg);
+		}
+
+	BEGIN {
+		program = "install-moba";
+		STDERR = "/dev/stderr";
+
+		argi = 1;
+		path = nextarg("path to script");
+		dest = argi < ARGC? nextarg("destination"): ".";
+
+		# Assumption: `path` is the path to this script which is
+		# located in <base>/lib.  Manpages are in <base>/share/man/man1
+		# and _af_ is in <base>/bin.
+		#
+		# Get the base directory.
+
+		base = path;
+		if (base !~ /^(\/|\.\.?\/)/)
+			base = "./" base;
+
+		sub(/\/lib\/af\/.*/, "", base);
+		if (base == "")
+			base = ".";
+
+		if (base == path)
+			error("bad location: " path);
+
+		# Create the script.
+		S = "set -e\n" \
+			"\n";
+
+		S = S "# Create directories\n" \
+			make_directories(dest, "bin:conf:data:doc") \
+			"\n";
+
+		S = S "# Copy files.\n" \
+			copy_files(base "/bin", dest "/bin", "af") \
+		    	copy_files(base "/lib/af" , dest "/bin", "moba.sh" \
+				":config-moba.sh" \
+				":delete-files:extract-volumes:restore-files") \
+			"\n";
+
+		S = S "# Create documentatino.\n" \
+			make_manpages(base "/share/man/man1", dest "/doc",
+				"af.1:moba.1:delete-files.1:extract-volumes.1" \
+				":restore-files.1") \
+			"\n";
+
+		print S;
+		exit (0);
+		}' "$@"
+    }
+
+make_script "$0" "$@"
+exit
+
+

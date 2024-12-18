@@ -1,0 +1,223 @@
+#!/usr/bin/awk -f
+#
+
+#
+# Usage: make-install <dir> [<layout>]
+#
+# Create shell commands to install files according to <layout>
+# below <dir>.
+#
+
+function error(s) {
+	printf ("%s: %s\n", program, s) >>STDERR;
+	exit (1);
+	}
+
+function noctrl(s) {
+	sub(/[ \t\r\n]+$/, "", s);
+	return (s);
+	}
+
+function sq(string) {
+	gsub(/'/, "'\\''", string);
+	string = "'" string "'";
+	return (string);
+	}
+
+function getword(   w) {
+	w = $1;
+	$1 = "";
+	return (w);
+	}
+
+
+function add_directory(dir, op) {
+	dir_count += 1;
+	dir_list[dir_count] = dir;
+	dir_list[dir_count, "op"] = op;
+
+	return (dir_count);
+	}
+
+function test_directory(dir) {
+	return (add_directory(dir, "test"));
+	}
+
+function make_directory(dir) {
+	return (add_directory(dir, "mkdir"));
+	}
+
+function get_dirlist(op,   i, list) {
+	for (i = 1; i <= dir_count; i++) {
+		if (dir_list[i, "op"] == op)
+			list = list " " sq(dir_list[i]);
+		}
+
+	return (substr(list, 2));
+	}
+
+function copy_file(dir, fn) {
+	cp_list[dir] = cp_list[dir] fn "\n";
+	}
+
+
+function nextarg(par,   arg) {
+	if (argi >= ARGC) {
+		printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+		exit (1);
+		}
+		
+	arg = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (arg);
+	}
+
+BEGIN {
+	program = "make-install";
+	STDERR = "/dev/stderr";
+
+	_conf = "files.list";
+	_base = "/usr";
+	argi = 1;
+
+	if (ARGC == 1) {
+		printf ("Usage: make-install <dir> [<layout>]\n") >>STDERR;
+		exit (1);
+		}
+
+	_base = nextarg("base directory");
+	if (argi < ARGC)
+		_conf = nextarg("configuration file");
+
+
+	dir = "";
+	while (getline < _conf > 0) {
+		sub(/[ \t]*#.*$/, "", $0);
+		if ($0 == "")
+			continue;
+
+		is_dir = substr($0, 1, 1) > " ";
+		name = getword();
+		if (is_dir) {
+			sub(/:$/, "", name);
+			if (substr(name, 1, 1) == "+") {
+				dir = _base "/" substr(name, 2);
+				make_directory(dir);
+				}
+			else {
+				dir = _base "/" name;
+				test_directory(dir);
+				}
+			}
+		else {
+			if (dir == "")
+				error("directory not set: " name);
+
+			if (substr(name, 1, 1) == "+") {
+				uninstall_file = dir "/" substr(name, 2);
+				continue;
+				}
+
+			fn = name;
+			copy_file(dir, fn);
+			}
+		}
+
+	# Test for directories.
+	test = sprintf ("# Test for directories.\n" \
+		"for D in %s; do\n" \
+		"  test -d \"$D\"  ||  { echo \"directory not found: $D\"; exit 1; }\n" \
+		"done\n" \
+		"\n", get_dirlist("test"));
+
+	p = get_dirlist("mkdir");
+	if (p != "") {
+		make = sprintf ("# Create additional directories.\n" \
+			"mkdir -p %s\n" \
+			"\n", p);
+		}
+
+	for (k = 1; k <= dir_count; k++) {
+		dir = dir_list[k];
+		if (dir in cp_list) {
+			n = split(noctrl(cp_list[dir]), x, "\n");
+			p = "";
+			for (i = 1; i <= n; i++) {
+				if (x[i] == "")
+					continue;
+
+				p = p " " sq(x[i]);
+				rm_list = rm_list (dir "/" x[i]) "\n";
+				}
+
+			p = substr(p, 2);
+			if (p != "")
+				copy = copy sprintf ("cp --preserve=timestamps %s %s\n", p, sq(dir));
+			}
+		}
+
+	if (copy != "") {
+		copy = "# Copy files.\n" \
+			copy \
+			"\n";
+		}
+
+
+	if (uninstall_file != "") {
+		n = split(noctrl(rm_list), x, "\n");
+		p = "";
+		for (i = 1; i <= n; i++) {
+			if (x[i] == "")
+				continue;
+
+			p = p "rm " sq(x[i]) "\n";
+			}
+
+		p = p "rm " sq(uninstall_file) "\n";
+		remove = remove \
+			"# Delete files.\n" \
+			p \
+			"\n";
+
+		p = "";
+		for (i = 1; i <= dir_count; i++) {
+			if (dir_list[i, "op"] == "mkdir")
+				p = p "rmdir " sq(dir_list[i]) "\n";
+			}
+
+		if (p != "") {
+			remove = remove \
+				"# Delete directories.\n" \
+				p \
+				"\n";
+			}
+
+		uninst = sprintf ("# Create uninstall script\n" \
+			"cat <<'...' >%s\n" \
+			"#!/bin/sh\n" \
+			"#\n" \
+			"\n" \
+			"%s\n" \
+			"...\n" \
+			"\n" \
+			"# Make is executable.\n" \
+			"chmod 755 %s\n",
+			sq(uninstall_file), noctrl(remove),
+			sq(uninstall_file));
+		}
+
+
+	script = "#!/bin/sh\n" \
+		"#\n" \
+		"\n" \
+		"# Terminate on errors.\n" \
+		"set -e\n" \
+		"\n" \
+		test make copy uninst;
+	print script;
+
+	exit (0);
+	}
+
+

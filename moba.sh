@@ -132,7 +132,7 @@ Other operations in ${dir} are:
   restore-files		restore (parts of) an archive volume.
 
 Run the scripts without an argument to get a brief description or
-see ${relbase}/html-doc.
+see ${relbase}/doc.
   "
     }
 
