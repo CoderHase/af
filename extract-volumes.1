@@ -1,0 +1,96 @@
+.TH EXTRACT-VOLUMES 1 "27 OCTOBER 2021
+.SH NAME
+extract-volumes \- extract volumes from af archive
+.SH SYNOPSIS
+\fBextract-volumes\fR [\fBoptions\fR] \fIbase\fR \fIselector\fR ...
+.SH DESCRIPTION
+\fIextract-volumes\fR creates shell commands to copy complete volumes
+selected by \fIselector\fR out of the \fIaf\fR(1) archive below
+\fIbase\fR into the current directory.
+The commands must be piped to \fIsh\fR(1) to execute them.
+If executed the created files are complete and intact \fIaf\fR(1)
+archives that can be used on its own.
+For example they can be used with \fIrestore-files\fR(1) to restore one
+of the extracted volumes.
+.SS Selectors
+Volume selectors can specify the desired volumes in different formats.
+.TP
+\fIfrom\fR[-\fIto\fR]
+selects all volumes in the range \fIfrom\fR to \fIto\fR.
+.TP
+\fInum\fR \fIunit\fR
+a number followed (directly - no space between as shown above) with a
+\fIunit\fR of \fBd\fR, \fBh\fR or \fBw\fR for days, hours or weeks
+respectively to select all volumes that are newer than \fInum\fR units.
+If \fInum\fR starts with a \fB+\fR the current time is rounded down to
+the next full unit before comparing timestamps.
+.TP
+\fInum\fR\fBv\fR
+selects the last \fInum\fR volumes.
+.PP
+If more that one \fIselector\fR is given all are applied and volumes
+that match at least one condition are selected.
+If e.g. \fB3w 5v\fR is used then the extracted files will reach at least
+3 weeks in the past and at least the latest 5 volumes are copied out.
+.SS "Archive Destinations"
+Instead of copying files into the current directory (or any other set
+with the \fB--d\fR option) \fIextract-volumes\fR can store the selected
+files into an file-archive.
+The archive filename must be set with the \fB-o\fR option and has the
+format
+.sp
+  \fIname\fR[=\fIformat\fR]
+.sp
+where \fIname\fR is the archive's filename and \fIformat\fR the type
+specification if it cannot be derived from the file's extension.
+Supported formats and recognized extensions are
+.sp
+  .cpio
+  .cgz .cpio.gz
+  .tar .tar.gz
+  .shar .sh
+  .zip
+.sp
+with their usual meaning.
+.PP
+.SS "Repeated Execution"
+\fIextract-volumes\fR may be invoked muliple times to extract volumes
+from a growing archive into the same destination.
+The \fB-r\fR option can be used to keep the destination from
+accumulating all files over time.
+With \fB-r\fR set, all files below the destination directory that are
+not part of the extracted volumes are removed.
+.PP
+Notice that this affects all files from prior extractions, which are not
+selected by the current run and all files that are not related to any
+volume at all.
+.PP
+If \fB-r\fR is given twice, the name of a destination archive is
+expected to which the files are moved.
+.SH OPTIONS
+.TP
+\fB-d\fR \fIdir\fR
+copy files to \fIdir\fR instead of the current directory.
+.TP
+\fB-l\fR
+list only the selected volume numbers.
+.TP
+\fB-o\fR \fIfn\fR
+.TP
+\fB-r\fR
+remove all files from the destination directory, which do not belong
+to one the extracted volumes.
+This affects files that are part of previously extracted volumes and
+files that are not related the archive at all.
+.TP
+\fB-rr\fR
+instead of deleting files from the directory move them to the archive
+\fIfn\fR.
+.SH "NOTES"
+\fIextract-volumes\fR is located in \fI/usr/lib/af\fR.
+.SH "SEE ALSO"
+.IR af (1),
+.IR delete-files (1),
+.IR moba (1),
+.IR restore-files (1).
+

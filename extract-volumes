@@ -1,0 +1,726 @@
+#!/usr/bin/gawk -E
+#
+
+
+BEGIN {
+	maxArg  = 20;
+	maxLen  = 8192;
+	cpFlags = "--preserve=timestamps,mode";
+	}
+
+function error(msg) {
+	printf ("%s: %s\n", program, msg) >>STDERR;
+	exit (1);
+	}
+
+
+function skipws(line) {
+	sub(/^[ \t\r\n]+/, "", line);
+	return (line);
+	}
+
+function noctrl(line) {
+	sub(/[ \t\r\n]+$/, "", line);
+	return (line);
+	}
+
+function getEol(   p) {
+	p = ";\n";
+	return (p);
+	}
+
+function sq(string) {
+	gsub(/'/, "'\\''", string);
+	string = "'" string "'";
+	return (string);
+	}
+
+function dq(s) {
+	gsub(/\\"`/, "\\&", s);
+	s = "\"" s "\"";
+	return (s);
+	}
+
+function sq2(s,   i, d) {
+	if (s !~ /[\\\$]/) {
+		for (i = 1; i <= _sqc; i++) {
+			if (substr(s, _sqLen[i]+1, 1) == "/"  &&
+			    substr(s, 1, _sqLen[i]) == _sqPath[i])
+				d = dq( "${" _sqName[i] "}/" substr(s, _sqLen[i] + 2));
+			else if (s == sqPath[i])
+				d = dq( "${" _sqName[i] "}/");
+			}
+		}
+
+	if (d == "")
+		d = sq(s);
+
+	return (d);
+	}
+
+function sq2dir(var, val) {
+	if (val == ""  ||  val == "/")
+		return;
+
+	_sqc++;
+	_sqName[_sqc] = var;
+	_sqLen[_sqc]  = length(val);
+	_sqPath[_sqc] = val;
+
+	SQ2 = SQ2 sprintf ("%s=%s  ||  exit 1\n", var, sq(val));
+	}
+
+
+function bn(fn) {
+	sub(/^.*\//, "", fn);
+	return (fn);
+	}
+
+function dn(fn) {
+	if (index(fn, "/") == 0)
+		return ("");
+
+	sub(/\/[^\/]*$/, "", fn);
+	return (fn);
+	}
+
+
+
+function initOperations(   I) {
+	I = SQ2;
+	if (I != "")
+		I = I "\n";
+
+	return (I);
+	}
+
+
+function mkdir(dir, noParents, getCmd,   rc, cmd) {
+	if (noParents == 0)
+		cmd = sprintf ("mkdir -p %s", sq(dir));
+	else {
+		cmd = sprintf ("test -d %s  ||\n" \
+			"  { echo no such directory: %s >&2; exit 1; }\n" \
+			"mkdir %s\n", dn(dir), dn(dir), sq(dir));
+		}
+
+	if (getCmd != 0)
+		return (cmd);
+
+	if ((rc = _system(cmd)) != 0)
+		exit (rc);
+
+	return (rc);
+	}
+
+
+#
+# isLocal[fn]		stores if a file is already present in the DEST.
+#
+# isRequired[fn]	stores if a (possibly already local) file is
+#			required for the volumes under construction.
+#
+# localDirCount[dir]	stores how many files are stored in each
+#			sub directory of DEST.
+#
+# getRemoveOperations()	computes the difference between isLocal[] and
+#			isRequired[] plus the required "rm -f" and "rmdir"
+#			operations.
+#
+# fops["mkdir"]		list of directories that need to be created.
+#
+# flist[dir]		list of files that must be copied to dir.
+#
+
+
+#
+# getArchiveOperation() computes a shell command to put the files
+# argv[1 .. argc] into the file archive of format mode = [tar|cpio|zip].
+#
+
+function getArchiveOperation(mode, archive, base, argc, argv,
+					i, fn, dir, p,
+					__haveDir, cmd, T) {
+	for (i = 1; i <= argc; i++) {
+		fn  = argv[i];
+		dir = dn(fn);
+		if (! (dir in __haveDir)) {
+			p = dir "\n";
+			__haveDir[dir] = 1;
+
+			# Add parent directories as needed.
+			while ((dir = dn(dir)) != ""  &&  ! (dir in __haveDir)) {
+				p = p dir "\n";
+				__haveDir[dir] = 1;
+				}
+
+			if (mode !~ /^(tar|zip|shar)$/)
+				T = T p; 
+			}
+
+		T = T fn "\n";
+		}
+
+	if (mode == "tgz")
+		cmd = "tar -czv --verbatim-files-from -T -";
+	else if (mode == "cpio"  ||  mode == "cgz")
+		cmd = "cpio --create -v";
+	else if (mode == "cgz")
+		cmd = "cpio --create -v <<~EOF | gzip";
+	else if (mode == "shar")
+		cmd = "shar -z";
+	else if (mode == "zip")
+		cmd = "zip -@ -";
+	else
+		error("bad archive mode: " mode);
+
+	T = sprintf ("( cd %s  &&\n" \
+			"  exec %s <<~EOF) >%s;  rc=$?\n",
+			sq(base), cmd, sq(archive)) \
+		T \
+		"~EOF\n";
+
+	if (mode == "cgz") {
+		T = T \
+			"if [ $rc = "0" ]; then\n" \
+			sprintf ("  gzip -S '~' %s  &&  mv %s %s; rc=$?\n",
+				sq(archive), sq(archive "~"), sq(archive)) \
+			"fi\n";
+		}
+
+	T = T \
+		"if [ $rc != "0" ]; then\n" \
+		sprintf ("  echo error creating archive: %s >&2\n",
+			sq(archive)) \
+		"  exit 1\n" \
+		"fi\n";
+
+	return (T);
+	}
+
+
+function getRemoveOperations(mode, archive,   dir, fn, cmd, i, n, x, S) {
+	for (fn in isLocal) {
+		if (! (fn in isRequired)) {
+			x[fn] = 1;
+			localDirCount[ dn(fn)]--;
+			}
+		}
+
+	n = asorti(x);
+	if (mode != "") {
+		S = getArchiveOperation(mode, archive, DEST, n, x) \
+			"\n";
+		sub(/<<[^\n]+/, "&  ||  exit 1", S);
+		}
+
+	if (1) {
+		while ((p = getParameter(n, x, 1)) != "")
+			S = S "rm -f" p "  ||  exit 1" getEol();
+		}
+
+	
+	# Go through the list of local directories and see which is
+	# empty and can be removed.
+	n = asorti(localDirCount, x);
+
+	# The loop check sub directories first.
+	for (i = n; i > 0; i--) {
+		if ((dir = x[i]) == "")
+			continue;
+
+		if (localDirCount[dir] < 0)
+			error("dir usage count = " localDirCount[dir] " < 0");
+		else if (localDirCount[dir] == 0) {
+			# dir itself is already going to be deleted
+			# by the next for-in loop but we need to
+			# decrement the parent directory counter. 
+			localDirCount[ dn(dir)]--;
+			}
+		}
+
+
+	# Now check which directories are completly empty and
+	# put them on the list x[].
+	delete x;
+	for (dir in localDirCount) {
+		if (dir == "")
+			continue;
+
+		if (localDirCount[dir] < 0)
+			error("dir usage count = " localDirCount[dir] " < 0");
+		else if (localDirCount[dir] == 0)
+			x[dir] = 1;
+		}
+
+
+	n = asorti(x);
+	if (n > 0) {
+		S = S "\n";
+
+		# Reverse the order - now in getParameter().
+		#for (i = 1; i <= int(n / 2); i++) {
+		#	dir = x[i];
+		#	x[i] = x[n-i+1];
+		#	x[n-i+1] = dir;
+		#	}
+
+		# Reverse the order: sub directories first.
+		while ((p = getParameter(n, x, 1, 1)) != "")
+			S = S "rmdir" p getEol();
+		}
+
+	return (S);
+	}
+
+function __scanDestination(   n, cmd, fn, dir) {
+	cmd = sprintf ("find %s -type f -printf '%P\n'", sq(DEST));
+	while (cmd | getline fn > 0) {
+		dir = dn(fn);
+		localDirCount[dir]++;
+		isLocal[fn] = 1;
+		n++;
+		}
+
+	close (cmd);
+	return (n);
+	}
+
+function scanDestination(   n, cmd, fn, dir, line, x) {
+	cmd = sprintf ("find %s -printf '%P\t%y\n'", sq(DEST));
+	while (cmd | getline line > 0) {
+		split(line, x, "\t");
+		fn = x[1];
+		if (x[2] == "f") {
+			dir = dn(fn);
+			localDirCount[dir]++;
+			isLocal[fn] = 1;
+			n++;
+			}
+		else if (x[2] == "d") {
+			dir = dn(fn);
+			localDirCount[dir]++;
+			isLocalDir[fn] = 1;
+			}
+		}
+
+	close (cmd);
+	return (n);
+	}
+
+function getDirList(   k, p, cmd, line, max, x) {
+
+	cmd = sprintf ("find %s -name %s -maxdepth 2 -printf '%P\t%T@\n' 2>/dev/null",
+			sq(BASEDIR), sq(".archive.tab"));
+
+	while (cmd | getline line > 0) {
+		split(line, x, "\t");
+		if (match(line, /^([0-9]+-([^\/\t]+))\/[^\/\t]+\t(.*)$/, x) == 0)
+			continue;
+
+		p = x[1];
+		k = p+0;
+		if (k > 0) {
+			volume[k]  = p;
+			lastmod[p] = int(x[3])
+
+			if (k > max)
+				max = k;
+			}
+		}
+
+	close (cmd);
+	volume[""] = max;
+
+	return (max);
+	}
+
+function selectByNumber(lower, upper,   k, n) {
+	if (upper < lower)
+		upper = lower;
+
+	for (k = lower; k <= upper; k++) {
+		if (k in volume) {
+			volumeSelected[k] = 1;
+			n++;
+			}
+		}
+
+	return (n);
+	}
+
+function selectVolumes(par,   i, k, u, num, unit, max) {
+	unit = substr(par, length(par), 1);
+	num  = par + 0;
+	max  = volume[""];
+
+	if (unit == "v") {
+		k = max;
+		volumeSelected[k] = 1;
+		num--;
+		while (k > 0  &&  num > 0) {
+			k--;
+			if (k in volume) {
+				volumeSelected[k] = 1;
+				#dirv[++dirc] = k;
+				num--;
+				}
+
+			}
+		}
+	else if (index("dhw", unit) > 0) {
+		if (unit == "d")
+			u = 86400;
+		else if (unit == "h")
+			u = 3600;
+		else if (unit == "w")
+			u = 7 * 86400;
+
+		k = systime();
+		if (substr(par, 1, 1) == "+")
+			k = int(k / u) * u;
+
+		k = k - num * u;
+		for (i = 1; i <= max; i++) {
+#print k, i, volume[i], lastmod[ volume[i]];
+			if (lastmod[ volume[i]] >= k)
+				volumeSelected[ i ] = 1;
+				#dirv[++dirc] = i;
+			}
+		}
+	else
+		error("bad unit specification: " par);
+
+	return (0);
+	}
+
+
+function addDir(dir,   p, parent, x) {
+	if (! (dir in haveDir)) {
+		parent = dn(dir);
+		if (parent != ""  &&  parent != "/"  &&  parent != ".")
+			addDir(parent);
+
+		fops["mkdir"] = fops["mkdir"] dir "\n";
+		haveDir[dir] = 1;
+		}
+
+	return (0);
+	}
+
+function addFile(fn,   dir) {
+	if (fn in isLocal)
+		return (0);
+
+	dir = dn(fn);
+	if (! (dir in haveDir))
+		addDir(dir);
+
+	flist[dir] = flist[dir] fn "\n";
+
+	__haveFile[fn] = "f";
+	return (0);
+	}
+
+
+function getParameter(argc, argv, isDest, reverse,   k, n, len, p, par) {
+	if ((k = argv[0]) == 0)
+		k = reverse == 0? 1: argc;
+
+	while (k > 0  &&  k <= argc  &&  n < maxArg  &&  len < maxLen) {
+		#if ((p = argv[k++]) == "")
+		#	continue;
+		p = argv[k];
+		k = k + (reverse == 0? 1: -1);
+		if (p == "")
+			continue;
+
+		if (isDest != 0) {
+			if (DEST != "")
+				p = DEST "/" p;
+			}
+		else
+			p = BASEDIR "/" p;
+
+		par = par " " sq2(p);
+		len += length(p) + 3;
+		n++;
+		}
+
+	if (k == 0)
+		k = -1;
+
+	argv[0] = k;
+	return (par);
+	}
+
+function getOperations() {
+	error("single file mode not implemented.");
+	}
+
+function getDirOperations(   n, x, p, S) {
+	if (multidir == 0)
+		S = getOperations("mkdir");
+	else {
+		split(noctrl(fops["mkdir"]), x, "\n");
+		n = asort(x);
+		while ((p = getParameter(n, x, 1)) != "")
+			S = S "mkdir -p" p "  ||  exit 1" getEol();
+		}
+
+	return (S);
+	}
+
+function getFileOperations(   i, n, p, dst, dir, argc, argv, S) {
+	if (multifile == 0)
+		S = getOperations("cp");
+	else {
+		n = asorti(flist, dir);
+		for (i = 1; i <= n; i++) {
+			dst = DEST == ""? dir[i]: DEST "/" dir[i];
+			argc = split( noctrl(flist[ dir[i] ]), argv, "\n");
+			while ((p = getParameter(argc, argv, 0)) != "")
+				S = S "cp " cpFlags p " " sq2(dst == ""? ".": dst) getEol();
+			}
+		}
+
+	return (S);
+	}
+
+
+
+function __filesFromDirectory(dir,   n, line, fc, fn, x) {
+	fn = sprintf ("%s/%s/%s", BASEDIR, dir, ".archive.tab");
+	while (getline line <fn > 0) {
+		if (split(line, x, "\t") < FARC)
+			continue;
+
+		f = x[FARC];
+		if (x[FTYPE] == "d")
+			continue;
+			# f = dir "/" x[FNAME];
+
+		isRequired[f] = 1;
+		if (f in isLocal)
+			continue;
+		else if (f in __haveFile)
+			continue;
+
+		addFile(f);
+		n++;
+		}
+
+	n = split(".archive.tab .archive.log", x, " ");
+	for (i = 1; i <= n; i++) {
+		fn = sprintf ("%s/%s", dir, x[i]);
+		addFile(fn);
+		isRequired[fn] = 1;
+		}
+
+	#addFile( sprintf ("%s/%s", dir, ".archive.tab"));
+	#addFile( sprintf ("%s/%s", dir, ".archive.log"));
+
+	return (n);
+	}
+
+function getFiles(dirc, dirv, FV,   i, n, d, x) {
+	for (i = 1; i <= dirc; i++) {
+		__filesFromDirectory(dirv[i]);
+		}
+
+	n = asorti(__haveFile, FV);
+	return (n);
+	}
+
+
+function getArchiveFile(fn) {
+	sub(/=[^=]*$/, "", fn);
+	return (fn);
+	}
+
+function getArchiveMode(fn,   mode, x) {
+	if (match(fn, /=([^=]+)$/, x) > 0)
+		mode = x[1];
+	else {
+		if (fn ~ /\.cpio$/)
+			mode = "cpio";
+		else if (fn ~ /\.(cgz|cpio.gz)$/)
+			mode = "cgz";
+		else if (fn ~ /\.(tgz|tar.gz)$/)
+			mode = "tgz";
+		else if (fn ~ /\.(shar|sh)$/)
+			mode = "shar";
+		else if (fn ~ /\.zip$/)
+			mode = "zip";
+		}
+
+	if (mode !~ /^(cpio|cgz|tgz|zip|shar)$/)
+		error("bad archive mode: " mode);
+
+	return (mode);
+	}
+
+function usage() {
+	printf ("\nusage: %s [<options>] <base-directory> <selector> [...]\n\n", program);
+
+	printf ("%s creates shell commands to copy complete volumes out of\n" \
+		"the af(1) archive in <base-directory>.  The commands must be piped to\n" \
+		"sh(1) to execute them.\n" \
+		"\n", program);
+
+	printf ("Options:\n" \
+		"  -d <dir>	copy files to <dir> (instead of current directory).\n" \
+		"  -o <fn>	copy files to archive file <fn> (instead of a directory).\n" \
+		"  -r		remove copied files from the destination that are not\n" \
+		"		selected by the current selection.\n" \
+		"  -rr <fn>	move files from the desination to <fn> (instead of deleting).\n" \
+		"  -s		print only the selected volume numbers\n" \
+		"\n");
+
+	printf ("Archive filenames have the form <filename>[=<format>] where <format>\n" \
+		"is one of cpio, cgz, shar, tgz or zip to set the file format explicitly.\n" \
+		"The <format> identifier is not required if they are the extension\n" \
+		"of <filename>.  (.[tar|cpio].gz are also supported.)\n" \
+		"\n");
+
+	printf ("Valid volume <selectors> are:\n" \
+		"  <from>[-<to>]   selects (ranges of) volume numbers.\n" \
+		"\n" \
+		"  <num><unit>	   selects all volumes that are newer then <num> units\n" \
+		"		   where <unit> is one of d, h or w for days, hours or\n" \
+		"		   weeks.  If <num> starts with a +, the current time is\n" \
+		"		   rounded down to the next full <unit> before comparing\n" \
+		"		   the archive creation time.\n" \
+		"\n" \
+		"		   In case <unit> is v then the last <num> volumes are\n" \
+		"		   selected.\n" \
+		"\n");
+	exit (0);
+	}
+
+function nextarg(par,   arg) {
+	if (argi >= ARGC) {
+		printf ("%s: missing argument: %s\n", program, par) >>STDERR;
+		exit (1);
+		}
+		
+	arg = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (arg);
+	}
+
+BEGIN {
+	program = "extract-volumes";
+	OUT = STDERR = "/dev/stderr";
+
+	#__init();
+	FNAME = 1;
+	FTYPE = 2;
+	FARC  = 8;
+
+	_verbose = 1;
+	debug = 0;
+	multidir  = 1;
+	multifile = 1;
+	outputMode = "cp";
+	DEST  = ".";
+
+	argi = 1;
+	while (argi < ARGC  &&  substr(ARGV[argi], 1, 1) == "-") {
+		options = nextarg("option");
+		if (options == "--")
+			break;
+
+		for (i = 2; i <= length(options); i++) {
+			c = substr(options, i, 1);
+			if (c == "d")
+				DEST = nextarg("destination directory");
+			else if (c == "l")
+				selectionOnly = 1;
+			else if (c == "o") {
+				p = nextarg("archive");
+				outputMode = getArchiveMode(p);
+				archiveFile = getArchiveFile(p);
+				}
+			else if (c == "r") {
+				if (removeFiles == 0)
+					removeFiles = 1;
+				else {
+					p = nextarg("archive");
+					removeMode = getArchiveMode(p);
+					removeArchive = getArchiveFile(p);
+					removeFiles = 2;
+					}
+				}
+			else if (0  &&  c == "s") {
+				multifile = 0;
+				multidir  = 0;
+				}
+			else {
+				printf ("%s: unkown option: -%s\n", program, c) >>STDERR;
+				exit (1);
+				}
+			}
+		}
+
+	if (argi >= ARGC)
+		usage();
+
+	BASEDIR = nextarg("base directory");
+	getDirList();
+
+	while (argi < ARGC) {
+		arg = nextarg("selector");
+		if (arg ~ /^\+?[0-9]+[a-z]$/)
+			selectVolumes(arg);
+		else if (match(arg, /^([0-9]+)(-([0-9]+))?$/, x) > 0) {
+			if (selectByNumber(x[1]+0, x[3]+0) == 0)
+				error("no such volume: " arg);
+			}
+		else
+			error("bad volume selector: " arg);
+		}
+
+	for (k in volumeSelected)
+		volumeSelected[k] = volume[k];
+
+	dirc = asort(volumeSelected, dirv);
+	if (selectionOnly != 0) {
+		for (i = 1; i <= dirc; i++)
+			printf ("%04d\n", dirv[i]);
+
+		exit (0);
+		}
+
+	if (outputMode == "cp") {
+		isFileMode = 1;
+		if (length(BASEDIR) > 20)
+			sq2dir("B", BASEDIR);
+
+		if (length(DEST) > 10)
+			sq2dir("D", DEST);
+		}
+
+	scanDestination();
+	FC = getFiles(dirc, dirv, FV);
+
+
+	if (isFileMode == 0) {
+		T = getArchiveOperation(outputMode, archiveFile, BASEDIR, FC, FV);
+		}
+	else {
+		T = initOperations() \
+			getDirOperations("mkdir") \
+			getFileOperations("cp");
+
+		if (removeFiles != 0) {
+			T = T "\n" \
+				getRemoveOperations(removeMode, removeArchive);
+			}
+		}
+
+	print noctrl(T);
+	exit (0);
+}
+
